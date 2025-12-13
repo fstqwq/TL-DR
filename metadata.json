@@ -1,0 +1,5 @@
+{
+  "name": "Tri-Lingual Dictionary Remastered (TL;DR)",
+  "description": "An application that translates words between Chinese, English, and Japanese. It provides definitions and pronunciations (Pinyin, IPA, Hiragana) for all three languages using the LLM API and saves search history.",
+  "requestFramePermissions": []
+}
