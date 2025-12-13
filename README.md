@@ -1,5 +1,7 @@
-<div style="text-align: center;">
-    <img src="./public/favicon.svg" alt="TL;DR Logo" width="100" height="100"/>
+<div align="center">
+    <a href="https://github.com/fstqwq/TL-DR">
+        <img src="./public/favicon.svg" alt="TL;DR Logo" width="100" height="100"/>
+    </a>
 </div>
 
 # Tri-Lingual Dictionary Remastered (TL;DR)
