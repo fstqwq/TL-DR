@@ -134,7 +134,7 @@ function App() {
       const data = await lookupWord(query, preferredLang, searchModel);
       
       const newEntry: DictionaryEntry = {
-        id: crypto.randomUUID(),
+        id: query.trim().toLowerCase() + '_' + Date.now(), // for http deployment
         timestamp: Date.now(),
         query: query.trim(),
         data: data
@@ -273,9 +273,7 @@ function App() {
       <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
         <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
-            <svg className="w-9 h-9 shrink-0 hover:rotate-6 transition-transform cursor-pointer" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-              <rect width='100' height='100' rx='30' fill='#4f46e5'/> <rect x='15' y='15' width='70' height='70' rx='20' fill='#ffffff'/> <circle cx='38' cy='44' r='7.5' fill='#ef4444'/> <circle cx='62' cy='44' r='7.5' fill='#3b82f6'/> <path d='M37 60 Q50 72 63 60' stroke='#10b981' stroke-width='7' fill='none' stroke-linecap='round'/>
-            </svg>
+            <img src="/favicon.svg" alt="Logo" className="w-8 h-8 hover:rotate-6 transition-transform cursor-pointer" />
             <h1 className="text-xl font-bold tracking-tight text-indigo-600 hidden sm:block">Tri-Lingual Dictionary Remastered</h1>
             <h1 className="text-xl font-bold tracking-tight text-indigo-600 sm:hidden">TL;DR</h1>
           </div>

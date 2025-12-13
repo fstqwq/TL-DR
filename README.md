@@ -1,7 +1,5 @@
-<div align="center">
-<svg className="w-9 h-9 shrink-0 hover:rotate-6 transition-transform cursor-pointer" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="width:128px;height:128px;">
-<rect width='100' height='100' rx='30' fill='#4f46e5'/> <rect x='15' y='15' width='70' height='70' rx='20' fill='#ffffff'/> <circle cx='38' cy='44' r='7.5' fill='#ef4444'/> <circle cx='62' cy='44' r='7.5' fill='#3b82f6'/> <path d='M37 60 Q50 72 63 60' stroke='#10b981' stroke-width='7' fill='none' stroke-linecap='round'/>
-</svg>
+<div style="text-align: center;">
+    <img src="./public/favicon.svg" alt="TL;DR Logo" width="100" height="100"/>
 </div>
 
 # Tri-Lingual Dictionary Remastered (TL;DR)
