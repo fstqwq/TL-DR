@@ -419,7 +419,7 @@ function App() {
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2">
                   <History className="text-slate-400" />
-                  <h3 className="text-xl font-bold text-slate-800">Recent Searches</h3>
+                  <h3 className="text-xl font-bold text-slate-800">History</h3>
                 </div>
                 <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${counterStyles.container}`}>
                   <span>{history.length} / {MAX_HISTORY}</span>
