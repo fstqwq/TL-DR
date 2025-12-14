@@ -1,11 +1,12 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Search, History, Sparkles, Settings2, Dices, X, Check, HelpCircle } from 'lucide-react';
-import { lookupWord, generateSentence } from './services/llmService';
-import { DictionaryEntry, LuckySentenceResult, WordContext } from './types';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Search, History, Sparkles, Settings2, Dices, X, Check, HelpCircle, CornerDownLeft } from 'lucide-react';
+import { lookupWord, generateSentence, setRuntimeConfig } from './services/llmService';
+import { DictionaryEntry, LuckySentenceResult, WordContext, AppConfig } from './types';
 import { WordCard } from './components/WordCard';
 import { Spinner } from './components/Spinner';
 
 type PreferredLanguage = 'auto' | 'zh' | 'en' | 'ja';
+type AppProps = { config: AppConfig };
 
 const MAX_HISTORY = 42;
 
@@ -22,11 +23,11 @@ const DEFAULT_MODELS = [
 ];
 
 // Load models from Runtime Config
-const MODELS = (window.APP_CONFIG?.MODELS && window.APP_CONFIG.MODELS.length > 0)
-  ? window.APP_CONFIG.MODELS
-  : DEFAULT_MODELS;
-
-function App() {
+function App({ config }: AppProps) {
+  const models = useMemo(
+    () => (config.MODELS && config.MODELS.length > 0 ? config.MODELS : DEFAULT_MODELS),
+    [config]
+  );
   const [query, setQuery] = useState('');
   const [preferredLang, setPreferredLang] = useState<PreferredLanguage>('auto');
   
@@ -34,14 +35,14 @@ function App() {
   // If the stored model ID no longer exists in config, fall back to the first available model.
   const [searchModel, setSearchModel] = useState<string>(() => {
     const stored = localStorage.getItem('search_model');
-    const exists = MODELS.find(m => m.id === stored);
-    return exists ? stored! : MODELS[0].id;
+    const exists = models.find(m => m.id === stored);
+    return exists ? stored! : models[0].id;
   });
 
   const [luckyModel, setLuckyModel] = useState<string>(() => {
     const stored = localStorage.getItem('lucky_model');
-    const exists = MODELS.find(m => m.id === stored);
-    return exists ? stored! : MODELS[0].id;
+    const exists = models.find(m => m.id === stored);
+    return exists ? stored! : models[0].id;
   });
   
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -107,6 +108,11 @@ function App() {
     localStorage.setItem('lucky_model', luckyModel);
   }, [searchModel, luckyModel]);
 
+  // Provide runtime config to llmService (backend URL, etc.)
+  useEffect(() => {
+    setRuntimeConfig(config);
+  }, [config]);
+
   // Click outside to close settings
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -158,7 +164,7 @@ function App() {
 
   const handleLucky = async () => {
     if (history.length < 2) {
-      setError("Search for at least 2 words to use 'I'm feeling lucky'!");
+      setError("Search for at least 2 words to use 'I'm Feeling Lucky'!");
       setTimeout(() => setError(null), 3000);
       return;
     }
@@ -314,7 +320,7 @@ function App() {
                         onChange={(e) => setSearchModel(e.target.value)}
                         className="w-full appearance-none bg-slate-50 border border-slate-200 text-slate-700 text-sm rounded-lg p-2.5 focus:ring-indigo-500 focus:border-indigo-500 block"
                       >
-                        {MODELS.map(model => (
+                        {models.map(model => (
                           <option key={model.id} value={model.id}>{model.name}</option>
                         ))}
                       </select>
@@ -337,7 +343,7 @@ function App() {
                         onChange={(e) => setLuckyModel(e.target.value)}
                         className="w-full appearance-none bg-violet-50 border border-violet-100 text-violet-900 text-sm rounded-lg p-2.5 focus:ring-violet-500 focus:border-violet-500 block"
                       >
-                         {MODELS.map(model => (
+                         {models.map(model => (
                           <option key={model.id} value={model.id}>{model.name}</option>
                         ))}
                       </select>
@@ -345,7 +351,7 @@ function App() {
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
                       </div>
                     </div>
-                    <p className="text-xs text-slate-400 mt-1">Thinking models recommended for creativity -- at the cost of speed.</p>
+                    <p className="text-xs text-slate-400 mt-1">Thinking models recommended for creativity - at the cost of speed.</p>
                   </div>
                </div>
              )}
@@ -390,7 +396,7 @@ function App() {
                 disabled={isLoading || !query.trim()}
                 className="absolute right-2 top-2 bottom-2 bg-indigo-600 text-white px-6 rounded-full font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
               >
-                {isLoading ? '...' : 'Go'}
+                {isLoading ? '...' : <CornerDownLeft size={18} />}
               </button>
             </form>
           </div>
@@ -415,11 +421,11 @@ function App() {
         {/* History Section */}
         {history.length > 0 && (
           <section className="pt-8 border-t border-slate-200">
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-6">
+            <div className="flex flex-row items-center justify-between gap-4 mb-6">
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2">
                   <History className="text-slate-400" />
-                  <h3 className="text-xl font-bold text-slate-800">History</h3>
+                  <h3 className="text-xl font-bold text-slate-800 hidden sm:block">History</h3>
                 </div>
                 <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${counterStyles.container}`}>
                   <span>{history.length} / {MAX_HISTORY}</span>
@@ -438,10 +444,10 @@ function App() {
                 <button
                   onClick={handleLucky}
                   disabled={isLuckyLoading}
-                  className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-full text-sm font-bold shadow-sm hover:shadow-md hover:scale-105 transition-all active:scale-95 disabled:opacity-70 disabled:cursor-wait"
+                  className="group flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-full text-sm font-bold shadow-sm hover:shadow-md hover:scale-105 transition-all active:scale-95 disabled:opacity-70 disabled:cursor-wait"
                 >
-                  <Dices size={18} />
-                  <span>I'm feeling lucky</span>
+                  <Dices size={24} className="transition-transform duration-500 group-hover:rotate-180" />
+                  <span className="sm:block hidden">I'm Feeling Lucky</span>
                 </button>
               )}
             </div>
@@ -521,26 +527,27 @@ function App() {
         )}
       </main>
       <footer className="py-8 text-center text-slate-400 text-sm">
-          <p>
-            Built by fstqwq and, mostly, Gemini 3 Pro.
-          </p>
-          <p className="mt-2">
-            <a 
-              href="https://github.com/fstqwq/TL-DR" 
-              target="_blank" 
-              rel="noopener noreferrer"
-              className="text-indigo-500 font-medium inline-flex items-center gap-1.5 group relative"
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-github"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg>
-              Star me on GitHub
-                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-56 p-2 bg-slate-800 text-white text-xs rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none text-center z-10 font-normal no-underline">
-                いいねくれぇ！！
-                いいねくれぇ！！
-                <img src="/bocchi.png" alt="Bocchi" className="mx-auto mb-2" />
-                </div>
-            </a>
-          </p>
-        </footer>
+        <div>
+          Built by fstqwq and, mostly, Gemini 3 Pro.
+        </div>
+        <div className="mt-2">
+          <a 
+            href="https://github.com/fstqwq/TL-DR" 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="text-indigo-500 font-medium inline-flex items-center gap-1.5 group relative"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-github"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg>
+            Star me on GitHub
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 w-56 p-2 bg-slate-800 text-white text-xs rounded shadow-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none text-center z-10 font-normal no-underline">
+              いいねくれぇ！！
+              いいねくれぇ！！
+              <img src="/bocchi.png" alt="Bocchi" className="mx-auto" />
+              <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-800"></div>
+            </div>
+          </a>
+        </div>
+      </footer>
     </div>
   );
 }

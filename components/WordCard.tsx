@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { DictionaryEntry } from '../types';
 import { LanguageBadge } from './LanguageBadge';
 import { Volume2, BookOpen, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
@@ -109,37 +109,79 @@ export const WordCard: React.FC<WordCardProps> = ({ entry, isHistory = false, on
             {/* Chinese */}
             <div 
               onClick={(e) => playAudio(e, data.translations.zh.word, 'zh')}
-              className="text-center p-3 bg-slate-50 rounded-lg border border-slate-100 hover:border-red-200 hover:bg-red-50 transition-colors cursor-pointer group flex flex-col items-center justify-center min-h-[90px]"
+              className="text-center bg-red-50/40 rounded-lg border border-red-100 transition-colors cursor-pointer group flex flex-col items-center justify-center min-h-[90px] hover:bg-red-50 hover:border-red-200"
             >
-              <span className="text-xs text-slate-400 group-hover:text-red-400 uppercase tracking-wider mb-1">Chinese</span>
-              <span className="text-lg font-bold text-slate-800 group-hover:text-red-900 leading-tight">{data.translations.zh.word}</span>
-              <span className="text-sm text-slate-500 group-hover:text-red-700 font-medium">{data.translations.zh.pronunciation}</span>
+              {/* <span className="text-[10px] sm:text-xs text-slate-400 group-hover:text-red-400 uppercase tracking-wider mb-1">Chinese</span> */}
+              <span className="text-lg sm:text-xl font-bold text-slate-800 group-hover:text-red-900 leading-tight">{data.translations.zh.word}</span>
+              <span className="text-xs sm:text-sm text-slate-500 group-hover:text-red-700 font-medium">{data.translations.zh.pronunciation}</span>
             </div>
 
             {/* English */}
             <div 
               onClick={(e) => playAudio(e, data.translations.en.word, 'en')}
-              className="text-center p-3 bg-slate-50 rounded-lg border border-slate-100 hover:border-blue-200 hover:bg-blue-50 transition-colors cursor-pointer group flex flex-col items-center justify-center min-h-[90px]"
+              className="text-center bg-blue-50/40 rounded-lg border border-blue-100 transition-colors cursor-pointer group flex flex-col items-center justify-center min-h-[90px] hover:bg-blue-50 hover:border-blue-200"
             >
-              <span className="text-xs text-slate-400 group-hover:text-blue-400 uppercase tracking-wider mb-1">English</span>
-              <span className="text-lg font-bold text-slate-800 group-hover:text-blue-900 leading-tight">{data.translations.en.word}</span>
-              <span className="text-sm font-mono text-slate-500 group-hover:text-blue-700">{data.translations.en.pronunciation}</span>
+              {/* <span className="text-[10px] sm:text-xs text-slate-400 group-hover:text-blue-400 uppercase tracking-wider mb-1">English</span> */}
+              <span className="text-lg sm:text-xl font-bold text-slate-800 group-hover:text-blue-900 leading-tight">{data.translations.en.word}</span>
+              <span className="text-xs sm:text-sm font-mono text-slate-500 group-hover:text-blue-700">{data.translations.en.pronunciation}</span>
             </div>
 
             {/* Japanese */}
             <div 
               onClick={(e) => playAudio(e, data.translations.ja.word, 'ja')}
-              className="text-center p-3 bg-slate-50 rounded-lg border border-slate-100 hover:border-emerald-200 hover:bg-emerald-50 transition-colors cursor-pointer group flex flex-col items-center justify-center min-h-[90px]"
+              className="text-center bg-emerald-50/40 rounded-lg border border-emerald-100 transition-colors cursor-pointer group flex flex-col items-center justify-center min-h-[90px] hover:bg-emerald-50 hover:border-emerald-200"
             >
-              <span className="text-xs text-slate-400 group-hover:text-emerald-400 uppercase tracking-wider mb-1">Japanese</span>
-              <span className="text-lg font-bold text-slate-800 group-hover:text-emerald-900 leading-tight">{data.translations.ja.word}</span>
-              <span className="text-sm text-slate-500 group-hover:text-emerald-700 font-medium">{data.translations.ja.pronunciation}</span>
+              {/* <span className="text-[10px] sm:text-xs text-slate-400 group-hover:text-emerald-400 uppercase tracking-wider mb-1">Japanese</span> */}
+              <span className="text-lg sm:text-xl font-bold text-slate-800 group-hover:text-emerald-900 leading-tight">{data.translations.ja.word}</span>
+              <span className="text-xs sm:text-sm text-slate-500 group-hover:text-emerald-700 font-medium">{data.translations.ja.pronunciation}</span>
             </div>
           </div>
 
-          {/* Synonyms & Antonyms (New Feature) */}
+          {/* Definitions List */}
+          <div className="space-y-3 mb-6">
+            {/* Chinese Definition */}
+            <div className="flex items-start gap-3 group">
+              <button 
+                onClick={(e) => playAudio(e, data.definitions.zh, 'zh')}
+                className="w-8 h-8 rounded-full bg-red-50 flex items-center justify-center shrink-0 text-red-600 font-bold text-xs hover:bg-red-100 transition-colors cursor-pointer"
+                title="Read Chinese definition"
+              >
+                中
+              </button>
+              <p className="text-slate-700 mt-1 flex-grow text-sm sm:text-base">{data.definitions.zh}</p>
+            </div>
+
+            {/* English Definition */}
+            <div className="flex items-start gap-3 group">
+              <button 
+                onClick={(e) => playAudio(e, data.definitions.en, 'en')}
+                className="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center shrink-0 text-blue-600 font-bold text-xs hover:bg-blue-100 transition-colors cursor-pointer"
+                title="Read English definition"
+              >
+                EN
+              </button>
+              <p className="text-slate-700 mt-1 flex-grow text-sm sm:text-base">{data.definitions.en}</p>
+            </div>
+
+            {/* Japanese Definition */}
+            <div className="flex items-start gap-3 group">
+              <button 
+                onClick={(e) => playAudio(e, data.definitions.ja, 'ja')}
+                className="w-8 h-8 rounded-full bg-emerald-50 flex items-center justify-center shrink-0 text-emerald-600 font-bold text-xs hover:bg-emerald-100 transition-colors cursor-pointer"
+                title="Read Japanese definition"
+              >
+                日
+              </button>
+              <p className="text-slate-700 mt-1 flex-grow text-sm sm:text-base">
+                {/* Show origin word if it exists (e.g. for Loanwords) */}
+                {data.origin && <span className="font-bold mr-2">{data.origin}</span>}
+                {data.definitions.ja}
+              </p>
+            </div>
+          </div>
+
           {((data.synonyms && data.synonyms.length > 0) || (data.antonyms && data.antonyms.length > 0)) && (
-            <div className="flex flex-col sm:flex-row gap-6 mb-6 px-1 border-b border-slate-100 pb-4">
+            <div className="flex flex-col sm:flex-row gap-6 px-1 pb-4">
               {/* Synonyms */}
               {data.synonyms && data.synonyms.length > 0 && (
                 <div className="flex-1">
@@ -149,8 +191,7 @@ export const WordCard: React.FC<WordCardProps> = ({ entry, isHistory = false, on
                       <span 
                         key={idx} 
                         onClick={(e) => playAudio(e, word, data.detectedLanguage)}
-                        className="px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-md text-sm hover:bg-indigo-100 transition-colors cursor-pointer border border-indigo-100"
-                        title="Click to pronounce"
+                        className="px-2.5 py-1 bg-indigo-50 text-indigo-700 rounded-full text-sm hover:bg-indigo-100 transition-colors cursor-pointer border border-indigo-100"
                       >
                         {word}
                       </span>
@@ -168,8 +209,7 @@ export const WordCard: React.FC<WordCardProps> = ({ entry, isHistory = false, on
                       <span 
                         key={idx} 
                         onClick={(e) => playAudio(e, word, data.detectedLanguage)}
-                        className="px-2.5 py-1 bg-slate-100 text-slate-600 rounded-md text-sm hover:bg-slate-200 transition-colors cursor-pointer border border-slate-200"
-                        title="Click to pronounce"
+                        className="px-2.5 py-1 bg-slate-100 text-slate-600 rounded-full text-sm hover:bg-slate-200 transition-colors cursor-pointer border border-slate-200"
                       >
                         {word}
                       </span>
@@ -179,67 +219,6 @@ export const WordCard: React.FC<WordCardProps> = ({ entry, isHistory = false, on
               )}
             </div>
           )}
-
-          {/* Definitions List */}
-          <div className="space-y-3 mb-6">
-            {/* Chinese Definition */}
-            <div className="flex items-start gap-3 group">
-              <button 
-                onClick={(e) => playAudio(e, data.definitions.zh, 'zh')}
-                className="w-8 h-8 rounded-full bg-red-50 flex items-center justify-center shrink-0 text-red-600 font-bold text-xs hover:bg-red-100 transition-colors cursor-pointer"
-                title="Read Chinese definition"
-              >
-                中
-              </button>
-              <p className="text-slate-700 mt-1 flex-grow text-sm sm:text-base">{data.definitions.zh}</p>
-              <button 
-                onClick={(e) => playAudio(e, data.definitions.zh, 'zh')}
-                className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-600 transition-all"
-              >
-                <Volume2 size={16} />
-              </button>
-            </div>
-
-            {/* English Definition */}
-            <div className="flex items-start gap-3 group">
-              <button 
-                onClick={(e) => playAudio(e, data.definitions.en, 'en')}
-                className="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center shrink-0 text-blue-600 font-bold text-xs hover:bg-blue-100 transition-colors cursor-pointer"
-                title="Read English definition"
-              >
-                EN
-              </button>
-              <p className="text-slate-700 mt-1 flex-grow text-sm sm:text-base">{data.definitions.en}</p>
-              <button 
-                onClick={(e) => playAudio(e, data.definitions.en, 'en')}
-                className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-blue-600 transition-all"
-              >
-                <Volume2 size={16} />
-              </button>
-            </div>
-
-            {/* Japanese Definition */}
-            <div className="flex items-start gap-3 group">
-              <button 
-                onClick={(e) => playAudio(e, data.definitions.ja, 'ja')}
-                className="w-8 h-8 rounded-full bg-emerald-50 flex items-center justify-center shrink-0 text-emerald-600 font-bold text-xs hover:bg-emerald-100 transition-colors cursor-pointer"
-                title="Read Japanese definition"
-              >
-                日
-              </button>
-              <p className="text-slate-700 mt-1 flex-grow text-sm sm:text-base">
-                {/* Show origin word if it exists (e.g. for Loanwords) */}
-                {data.origin && <span className="font-bold mr-2">{data.origin}</span>}
-                {data.definitions.ja}
-              </p>
-              <button 
-                onClick={(e) => playAudio(e, data.definitions.ja, 'ja')}
-                className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-emerald-600 transition-all"
-              >
-                <Volume2 size={16} />
-              </button>
-            </div>
-          </div>
 
           {/* Example Sentence */}
           {data.exampleSentence && (

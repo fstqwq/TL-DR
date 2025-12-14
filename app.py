@@ -154,12 +154,12 @@ def lookup_word():
             "synonyms": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "List of 3-5 synonyms for the target word in its detected language."
+                "description": "List of 1-3 synonyms for the target word in its detected language."
             },
             "antonyms": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "List of 3-5 antonyms for the target word in its detected language (if applicable)."
+                "description": "List of 1-3 antonyms for the target word in its detected language (if applicable)."
             },
             "exampleSentence": {
                 "type": "object",

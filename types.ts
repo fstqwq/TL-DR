@@ -42,11 +42,7 @@ export interface LuckySentenceResult {
   };
 }
 
-declare global {
-  interface Window {
-    APP_CONFIG?: {
-      BACKEND_URL?: string;
-      MODELS?: Array<{ id: string; name: string }>;
-    };
-  }
+export interface AppConfig {
+  BACKEND_URL?: string;
+  MODELS?: Array<{ id: string; name: string }>;
 }

@@ -1,10 +1,15 @@
-import { DictionaryData, LuckySentenceResult, WordContext } from "../types";
+import { DictionaryData, LuckySentenceResult, WordContext, AppConfig } from "../types";
 
 // --- CONFIGURATION ---
 
+let runtimeConfig: AppConfig = {};
+
+export const setRuntimeConfig = (config: AppConfig) => {
+  runtimeConfig = config || {};
+};
+
 const getApiBaseUrl = () => {
-  const RUNTIME_CONFIG = window.APP_CONFIG || {};
-  const RAW_BASE_URL = RUNTIME_CONFIG.BACKEND_URL || 'http://localhost:5000';
+  const RAW_BASE_URL = runtimeConfig.BACKEND_URL || 'http://localhost:5000';
   return RAW_BASE_URL.replace(/\/$/, "");
 };
 

@@ -1,5 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import { AppConfig } from './types';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -8,26 +9,35 @@ if (!rootElement) {
 
 const root = ReactDOM.createRoot(rootElement);
 
-const loadConfig = async () => {
+const loadConfig = async (): Promise<AppConfig> => {
   try {
     const response = await fetch('/config.json');
     if (response.ok) {
       const config = await response.json();
-      window.APP_CONFIG = config;
-    } else {
-      console.warn('Failed to load config.json, using defaults');
+      return config;
     }
+    console.warn('Failed to load config.json, using defaults');
+    return {};
   } catch (error) {
     console.error('Error loading config.json:', error);
+    return {};
   }
 };
 
-loadConfig().then(() => {
-  import('./App').then(({ default: App }) => {
-    root.render(
-      <React.StrictMode>
-        <App />
-      </React.StrictMode>
-    );
-  });
+const bootstrap = async () => {
+  const [config, appModule] = await Promise.all([
+    loadConfig(),
+    import('./App')
+  ]);
+  const { default: App } = appModule;
+  root.render(
+    <React.StrictMode>
+      <App config={config} />
+    </React.StrictMode>
+  );
+};
+
+bootstrap().catch((err) => {
+  console.error('Bootstrap failed', err);
+  root.render(<div>Failed to start app.</div>);
 });
