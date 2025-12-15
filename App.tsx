@@ -1,14 +1,22 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Search, History, Sparkles, Settings2, Dices, X, Check, HelpCircle, CornerDownLeft } from 'lucide-react';
+﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Search, History, Sparkles, Settings2, Dices, X, HelpCircle, CornerDownLeft, Lightbulb } from 'lucide-react';
 import { lookupWord, generateSentence, setRuntimeConfig } from './services/llmService';
+import { playAudio } from './services/ttsService';
 import { DictionaryEntry, LuckySentenceResult, WordContext, AppConfig } from './types';
 import { WordCard } from './components/WordCard';
 import { Spinner } from './components/Spinner';
+import { LuckyResultCard } from './components/LuckyResultCard';
+import { PopQuizCard } from './components/PopQuizCard';
 
 type PreferredLanguage = 'auto' | 'zh' | 'en' | 'ja';
 type AppProps = { config: AppConfig };
 
 const MAX_HISTORY = 42;
+const DEFAULT_EASE = 2.5;
+const MIN_EASE = 1.3;
+const AGAIN_INTERVAL = 1000; // 1 second
+const HARD_MIN_INTERVAL = 3 * 60 * 1000; // 3 minutes
+const GOOD_NEW_INTERVAL = 30 * 60 * 1000; // 30 minutes
 
 // Default fallback models in case config is broken
 const DEFAULT_MODELS = [
@@ -55,6 +63,53 @@ function App({ config }: AppProps) {
   // App state
   const [currentResult, setCurrentResult] = useState<DictionaryEntry | null>(null);
   const [luckyResult, setLuckyResult] = useState<LuckySentenceResult | null>(null);
+  const [quizCard, setQuizCard] = useState<DictionaryEntry | null>(null);
+  const [quizRevealed, setQuizRevealed] = useState(false);
+  const [quizMessage, setQuizMessage] = useState<string | null>(null);
+  const [dueCount, setDueCount] = useState(0);
+  const [quizFeedback, setQuizFeedback] = useState<'again' | 'hard' | 'good' | null>(null);
+  const feedbackTimerRef = useRef<number | null>(null);
+  const [undoHistory, setUndoHistory] = useState<DictionaryEntry[] | null>(null);
+
+  const ensureScheduling = (entry: DictionaryEntry): DictionaryEntry => ({
+    ...entry,
+    nextReview: entry.nextReview ?? 0,
+    interval: entry.interval ?? 0,
+    ease: entry.ease ?? DEFAULT_EASE,
+    reps: entry.reps ?? 0,
+  });
+
+  const calculateDueCount = (list: DictionaryEntry[]) => {
+    const now = Date.now();
+    return list
+      .map(ensureScheduling)
+      .filter(item => (item.nextReview ?? 0) <= now).length;
+  };
+
+  const refreshDueCount = (list: DictionaryEntry[]) => {
+    setDueCount(calculateDueCount(list));
+  };
+
+  const updateHistoryWithUndo = useCallback((updater: (prev: DictionaryEntry[]) => DictionaryEntry[]) => {
+    setHistory(prev => {
+      setUndoHistory(prev);
+      return updater(prev);
+    });
+  }, []);
+
+  const setFeedback = (type: 'again' | 'hard' | 'good' | null) => {
+    if (feedbackTimerRef.current) {
+      window.clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = null;
+    }
+    setQuizFeedback(type);
+    if (type) {
+      feedbackTimerRef.current = window.setTimeout(() => {
+        setQuizFeedback(null);
+        feedbackTimerRef.current = null;
+      }, 3000);
+    }
+  };
 
   // Load history from local storage using Lazy Initialization
   const [history, setHistory] = useState<DictionaryEntry[]>(() => {
@@ -102,6 +157,10 @@ function App({ config }: AppProps) {
     localStorage.setItem('dictionary_history', JSON.stringify(history));
   }, [history]);
 
+  useEffect(() => {
+    refreshDueCount(history);
+  }, [history]);
+
   // Save model preferences
   useEffect(() => {
     localStorage.setItem('search_model', searchModel);
@@ -112,6 +171,14 @@ function App({ config }: AppProps) {
   useEffect(() => {
     setRuntimeConfig(config);
   }, [config]);
+
+  useEffect(() => {
+    return () => {
+      if (feedbackTimerRef.current) {
+        window.clearTimeout(feedbackTimerRef.current);
+      }
+    };
+  }, []);
 
   // Click outside to close settings
   useEffect(() => {
@@ -133,7 +200,6 @@ function App({ config }: AppProps) {
     setIsLoading(true);
     setError(null);
     setCurrentResult(null);
-    setLuckyResult(null); // Clear lucky result when searching
 
     try {
       // Use searchModel here
@@ -143,7 +209,11 @@ function App({ config }: AppProps) {
         id: query.trim().toLowerCase() + '_' + Date.now(), // for http deployment
         timestamp: Date.now(),
         query: query.trim(),
-        data: data
+        data: data,
+        nextReview: Date.now(),
+        interval: 0,
+        ease: DEFAULT_EASE,
+        reps: 0
       };
 
       setCurrentResult(newEntry);
@@ -195,27 +265,145 @@ function App({ config }: AppProps) {
     }
   };
 
-  const handleDeleteHistory = (id: string) => {
-    setHistory(prev => prev.filter(item => item.id !== id));
+  const startQuiz = () => {
+    if (history.length === 0) {
+      setError("Add some history first, then try pop quiz!");
+      setTimeout(() => setError(null), 2000);
+      return;
+    }
+    setFeedback(null);
+    setUndoHistory(null);
+    setQuizRevealed(false);
+    setQuizMessage(null);
+    refreshDueCount(history);
+    selectNextQuizCard(history);
   };
 
-  const playAudio = (text: string, lang: string) => {
-    if (!window.speechSynthesis) return;
-    
-    // Cancel any current speaking
-    window.speechSynthesis.cancel();
+  const selectNextQuizCard = (list: DictionaryEntry[]) => {
+    refreshDueCount(list);
+    if (list.length === 0) {
+      setQuizCard(null);
+      setQuizMessage("Pop quiz complete for now.");
+      return;
+    }
+    const now = Date.now();
+    const normalized = list.map(ensureScheduling);
+    const sorted = [...normalized].sort(
+      (a, b) => (a.nextReview ?? 0) - (b.nextReview ?? 0)
+    );
+    const due = sorted.find(entry => (entry.nextReview ?? 0) <= now);
+    if (due) {
+      setQuizCard(due);
+      setQuizRevealed(false);
+      setQuizMessage(null);
+    } else {
+      setQuizCard(null);
+      setQuizMessage("Pop quiz complete for now.");
+    }
+  };
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    
-    // Map internal codes to BCP 47 language tags
-    const langMap: Record<string, string> = {
-      zh: 'zh-CN',
-      en: 'en-US',
-      ja: 'ja-JP'
-    };
-    
-    utterance.lang = langMap[lang] || 'en-US';
-    window.speechSynthesis.speak(utterance);
+  const handleQuizRepeat = () => {
+    if (!quizCard) return;
+    const now = Date.now();
+    setFeedback('again');
+    updateHistoryWithUndo(prev => {
+      const updated = prev.map(item => {
+        if (item.id !== quizCard.id) return item;
+        const ensured = ensureScheduling(item);
+        const newEase = Math.max(MIN_EASE, (ensured.ease ?? DEFAULT_EASE) - 0.2);
+        return {
+          ...ensured,
+          ease: newEase,
+          interval: AGAIN_INTERVAL,
+          nextReview: now + AGAIN_INTERVAL,
+          reps: 0,
+        };
+      });
+      selectNextQuizCard(updated);
+      return updated;
+    });
+  };
+
+  const handleQuizHard = () => {
+    if (!quizCard) return;
+    const now = Date.now();
+    setFeedback('hard');
+    updateHistoryWithUndo(prev => {
+      const updated = prev.map(item => {
+        if (item.id !== quizCard.id) return item;
+        const ensured = ensureScheduling(item);
+        const baseInterval = ensured.interval ?? 0;
+        const nextInterval = Math.max(HARD_MIN_INTERVAL, Math.round(baseInterval * 1.2));
+        const newEase = Math.max(MIN_EASE, (ensured.ease ?? DEFAULT_EASE) - 0.15);
+        return {
+          ...ensured,
+          ease: newEase,
+          interval: nextInterval,
+          nextReview: now + nextInterval,
+        };
+      });
+      selectNextQuizCard(updated);
+      return updated;
+    });
+  };
+
+  const handleQuizGood = () => {
+    if (!quizCard) return;
+    const now = Date.now();
+    setFeedback('good');
+    updateHistoryWithUndo(prev => {
+      const updated = prev.map(item => {
+        if (item.id !== quizCard.id) return item;
+        const ensured = ensureScheduling(item);
+        const ease = ensured.ease ?? DEFAULT_EASE;
+        const baseInterval = ensured.interval ?? 0;
+        const nextInterval = baseInterval === 0
+          ? GOOD_NEW_INTERVAL
+          : Math.max(HARD_MIN_INTERVAL, Math.round(baseInterval * ease));
+        return {
+          ...ensured,
+          interval: nextInterval,
+          nextReview: now + nextInterval,
+          reps: (ensured.reps ?? 0) + 1,
+        };
+      });
+      selectNextQuizCard(updated);
+      return updated;
+    });
+  };
+
+  const handleQuizRemove = () => {
+    if (!quizCard) return;
+    setFeedback(null);
+    setQuizRevealed(false);
+    updateHistoryWithUndo(prev => {
+      const updated = prev.filter(item => item.id !== quizCard.id);
+      selectNextQuizCard(updated);
+      return updated;
+    });
+  };
+
+  const handleUndoRemove = () => {
+    if (!undoHistory) return;
+    setFeedback(null);
+    setQuizRevealed(false);
+    setQuizMessage(null);
+    setHistory(undoHistory);
+    selectNextQuizCard(undoHistory);
+    setUndoHistory(null);
+  };
+
+  const handleQuizReveal = () => {
+    if (!quizCard) return;
+    if (!quizRevealed) {
+      const lang = quizCard.data.detectedLanguage !== 'unknown' ? quizCard.data.detectedLanguage : 'en';
+      playAudio(quizCard.data.targetWord, lang);
+    }
+    setQuizRevealed(true);
+  };
+
+  const handleDeleteHistory = (id: string) => {
+    setHistory(prev => prev.filter(item => item.id !== id));
   };
 
   // Determine styles for the history counter
@@ -439,78 +627,57 @@ function App({ config }: AppProps) {
                 </div>
               </div>
               
-              {/* Lucky Button */}
-              {history.length >= 2 && (
-                <button
-                  onClick={handleLucky}
-                  disabled={isLuckyLoading}
-                  className="group flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-full text-sm font-bold shadow-sm hover:shadow-md hover:scale-105 transition-all active:scale-95 disabled:opacity-70 disabled:cursor-wait"
-                >
-                  <Dices size={24} className="transition-transform duration-500 group-hover:rotate-180" />
-                  <span className="sm:block hidden">I'm Feeling Lucky</span>
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                <div className="relative">
+                  <button
+                    onClick={startQuiz}
+                    disabled={history.length === 0}
+                    className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-full text-sm font-bold shadow-sm hover:shadow-md hover:scale-105 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    <Lightbulb size={24} />
+                    <span className="sm:block hidden">Pop Quiz</span>
+                  </button>
+                </div>
+
+                {/* Lucky Button */}
+                {history.length >= 2 && (
+                  <button
+                    onClick={handleLucky}
+                    disabled={isLuckyLoading}
+                    className="group flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-full text-sm font-bold shadow-sm hover:shadow-md hover:scale-105 transition-all active:scale-95 disabled:opacity-70 disabled:cursor-wait"
+                  >
+                    <Dices size={24} className="transition-transform duration-500 group-hover:rotate-180" />
+                    <span className="sm:block hidden">I'm Feeling Lucky</span>
+                  </button>
+                )}
+              </div>
             </div>
             
             <div className="space-y-3 max-w-3xl mx-auto">
-              
-              {/* Sticky Loading State for Lucky Mode */}
-              {isLuckyLoading && (
-                 <div className="bg-white rounded-xl shadow-sm border border-violet-100 p-6 flex flex-col items-center justify-center animate-pulse w-full">
-                    <Dices size={32} className="text-violet-600 animate-spin mb-2" />
-                    <p className="text-violet-600 font-medium text-sm">Mixing words...</p>
-                 </div>
-              )}
+              <LuckyResultCard
+                isLoading={isLuckyLoading}
+                result={luckyResult}
+                onDismiss={() => setLuckyResult(null)}
+              />
 
-              {/* Lucky Result - Displayed as top item in history stream */}
-              {!isLuckyLoading && luckyResult && (
-                <div className="animate-fade-in-up w-full">
-                  <div className="bg-gradient-to-br from-indigo-50 to-violet-50 rounded-xl border border-indigo-100 p-5 shadow-sm relative overflow-hidden group hover:shadow-md transition-shadow">
-                    <button 
-                      onClick={() => setLuckyResult(null)} 
-                      className="absolute top-3 right-3 text-slate-400 hover:text-slate-600 p-1 rounded-full hover:bg-white/50 transition-colors"
-                      title="Dismiss"
-                    >
-                      <X size={18} />
-                    </button>
-
-                    <div className="mb-4 flex flex-wrap items-center gap-2 pr-8">
-                        <span className="text-indigo-600 mr-1">
-                           <Dices size={20} />
-                        </span>
-                        {luckyResult.usedWords.map((word, i) => (
-                          <span key={i} className="px-2 py-0.5 bg-white/60 border border-indigo-100 text-indigo-700 rounded-md text-xs font-medium">
-                            {word}
-                          </span>
-                        ))}
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                        <div 
-                          onClick={() => playAudio(luckyResult.content.en.text, 'en')}
-                          className="bg-white/80 p-3 rounded-lg border border-indigo-50 hover:bg-white hover:border-blue-200 transition-all cursor-pointer"
-                        >
-                          <p className="text-slate-800 font-medium mb-1 leading-snug">{luckyResult.content.en.text}</p>
-                          <p className="text-slate-400 text-xs">{luckyResult.content.en.pronunciation}</p>
-                        </div>
-                        <div 
-                          onClick={() => playAudio(luckyResult.content.zh.text, 'zh')}
-                          className="bg-white/80 p-3 rounded-lg border border-indigo-50 hover:bg-white hover:border-red-200 transition-all cursor-pointer"
-                        >
-                          <p className="text-slate-800 font-medium mb-1 leading-snug">{luckyResult.content.zh.text}</p>
-                          <p className="text-slate-400 text-xs">{luckyResult.content.zh.pronunciation}</p>
-                        </div>
-                        <div 
-                          onClick={() => playAudio(luckyResult.content.ja.text, 'ja')}
-                          className="bg-white/80 p-3 rounded-lg border border-indigo-50 hover:bg-white hover:border-emerald-200 transition-all cursor-pointer"
-                        >
-                          <p className="text-slate-800 font-medium mb-1 leading-snug">{luckyResult.content.ja.text}</p>
-                          <p className="text-slate-400 text-xs">{luckyResult.content.ja.pronunciation}</p>
-                        </div>
-                    </div>
-                  </div>
-                </div>
-              )}
+              <PopQuizCard
+                quizCard={quizCard}
+                quizMessage={quizMessage}
+                quizRevealed={quizRevealed}
+                feedbackEffect={quizFeedback}
+                undoAvailable={!!undoHistory}
+                onClose={() => {
+                  setQuizCard(null);
+                  setQuizMessage(null);
+                }}
+                onReveal={handleQuizReveal}
+                onRepeat={handleQuizRepeat}
+                onHard={handleQuizHard}
+                onGood={handleQuizGood}
+                onRemove={handleQuizRemove}
+                onUndoRemove={handleUndoRemove}
+                dueCount={dueCount}
+              />
 
               {/* Standard History Items */}
               {history.map((entry) => (

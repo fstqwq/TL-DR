@@ -1,7 +1,7 @@
 import React from 'react';
 
 interface LanguageBadgeProps {
-  lang: 'zh' | 'en' | 'ja';
+  lang: 'zh' | 'en' | 'ja'
   label: string;
 }
 

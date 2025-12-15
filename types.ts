@@ -3,6 +3,10 @@ export interface DictionaryEntry {
   timestamp: number;
   query: string;
   data: DictionaryData;
+  nextReview?: number; // for spaced repetition scheduling (ms epoch)
+  interval?: number;   // last interval in ms
+  ease?: number;       // ease factor (e.g., 2.5)
+  reps?: number;       // successful reps count
 }
 
 export interface DictionaryData {
