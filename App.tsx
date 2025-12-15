@@ -631,11 +631,14 @@ function App({ config }: AppProps) {
                 <div className="relative">
                   <button
                     onClick={startQuiz}
-                    disabled={history.length === 0}
+                    disabled={history.length === 0 || dueCount === 0}
                     className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-amber-500 to-orange-500 text-white rounded-full text-sm font-bold shadow-sm hover:shadow-md hover:scale-105 transition-all active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     <Lightbulb size={24} />
                     <span className="sm:block hidden">Pop Quiz</span>
+                    <div className="absolute -top-2 -right-2 w-5 h-5 bg-slate-200 text-slate-600 rounded-full flex items-center justify-center text-xs font-semibold shadow">
+                      {dueCount}
+                    </div>
                   </button>
                 </div>
 

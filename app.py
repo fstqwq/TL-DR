@@ -1,5 +1,8 @@
 import os
 import json
+from urllib.parse import quote
+import cloudscraper
+from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from openai import OpenAI
@@ -66,6 +69,30 @@ def rate_limit():
     last_query = time.time()
     return True
 
+scraper = cloudscraper.create_scraper()
+from functools import lru_cache
+@lru_cache(maxsize=128)
+def fetch_first_kiji_text(word: str) -> str:
+    """
+    Fetch the Weblio page for the given word and return the text of the first element with class 'kiji'.
+    Return an empty string if the request fails.
+    """
+    url = f"https://www.weblio.jp/content/{quote(word)}"
+    resp = scraper.get(
+        url,
+        timeout=1,
+    )
+    if resp.status_code != 200:
+        return ""
+    resp.encoding = resp.apparent_encoding or "utf-8"
+    html = resp.text
+
+    soup = BeautifulSoup(html, "html.parser")
+    kiji = soup.find(class_="kiji")
+    if not kiji:
+        return ""
+    return kiji.get_text(strip=True, separator="")[:1000]
+
 @app.route('/api/lookup', methods=['POST'])
 def lookup_word():
     if not API_KEY:
@@ -79,7 +106,7 @@ def lookup_word():
     query = data.get('query')
     model = data.get('model')
     preferred_language = data.get('preferredLanguage', 'auto')
-
+    query = query.strip() if isinstance(query, str) else ""
     if not query:
         print("No query provided in the request.")
         return jsonify({"error": "No query provided"}), 400
@@ -159,7 +186,7 @@ def lookup_word():
             "antonyms": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "List of 1-3 antonyms for the target word in its detected language (if applicable)."
+                "description": "List of 0-3 antonyms for the target word in its detected language (if applicable)."
             },
             "exampleSentence": {
                 "type": "object",
@@ -171,6 +198,8 @@ def lookup_word():
             },
             "required": ["targetWord", "detectedLanguage", "definitions", "translations", "synonyms", "antonyms"],
         }
+
+        augmented_content = fetch_first_kiji_text(query)
 
         response = client.chat.completions.create(
             model=model,
@@ -201,7 +230,7 @@ Please note the difference between Hanzi and Kanji: the same literals may have d
                 },
                 {
                     "role": "user",
-                    "content": f"Analyze the query: \"{query}\". User preferred language context: {preferred_language} (If 'auto', detect. If specified, bias interpretation towards this language)."
+                    "content": f"Analyze the query: \"{query}\". User preferred language context: {preferred_language} (If 'auto', detect. If specified, bias interpretation towards this language)." + (f" Additionally, you can use the following content from dictionary about the word: {augmented_content}" if augmented_content else "")
                 }
             ],
             temperature=0.1,
