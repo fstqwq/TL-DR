@@ -21,7 +21,7 @@ You can try the demo [here](http://anon.fstqwq.pw/). Please be gentle, as my wal
 *   **Pronunciation:** Browser native TTS (Text-To-Speech).
 *   **History:** Saves recent searches to LocalStorage.
 *   **"I'm Feeling Lucky":** Random sentence generation based on recent searches.
-*   **Pop Quiz:** Memorize vocabulary with spaced repetition quizzes.
+*   **Pop Quiz:** Memorize vocabulary with spaced repetition quizzes like Anki.
 
 ## Known Issues
 

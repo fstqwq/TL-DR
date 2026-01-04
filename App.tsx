@@ -17,6 +17,8 @@ const MIN_EASE = 1.3;
 const AGAIN_INTERVAL = 1000; // 1 second
 const HARD_MIN_INTERVAL = 3 * 60 * 1000; // 3 minutes
 const GOOD_NEW_INTERVAL = 30 * 60 * 1000; // 30 minutes
+const LEARNING_REPEAT_CNT = 2;
+const LEARNING_HARD_CNT = 5;
 
 // Default fallback models in case config is broken
 const DEFAULT_MODELS = [
@@ -63,6 +65,7 @@ function App({ config }: AppProps) {
   // App state
   const [currentResult, setCurrentResult] = useState<DictionaryEntry | null>(null);
   const [luckyResult, setLuckyResult] = useState<LuckySentenceResult | null>(null);
+  const [luckySelectedWords, setLuckySelectedWords] = useState<string[]>([]);
   const [quizCard, setQuizCard] = useState<DictionaryEntry | null>(null);
   const [quizRevealed, setQuizRevealed] = useState(false);
   const [quizMessage, setQuizMessage] = useState<string | null>(null);
@@ -70,6 +73,8 @@ function App({ config }: AppProps) {
   const [quizFeedback, setQuizFeedback] = useState<'again' | 'hard' | 'good' | null>(null);
   const feedbackTimerRef = useRef<number | null>(null);
   const [undoHistory, setUndoHistory] = useState<DictionaryEntry[] | null>(null);
+  const learningCntRef = useRef<Map<string, number>>(new Map());
+  const pendingQuizSelectionRef = useRef(false);
 
   const ensureScheduling = (entry: DictionaryEntry): DictionaryEntry => ({
     ...entry,
@@ -242,6 +247,7 @@ function App({ config }: AppProps) {
     setIsLuckyLoading(true);
     setError(null);
     setLuckyResult(null);
+    setLuckySelectedWords([]);
     // REMOVED: setCurrentResult(null); We now keep the current result visible.
 
     try {
@@ -254,6 +260,8 @@ function App({ config }: AppProps) {
         word: e.data.targetWord,
         lang: e.data.detectedLanguage
       }));
+      const selectedWords = words.map(({ word }) => word);
+      setLuckySelectedWords(selectedWords);
 
       // Use luckyModel here
       const result = await generateSentence(words, luckyModel);
@@ -282,18 +290,67 @@ function App({ config }: AppProps) {
   const selectNextQuizCard = (list: DictionaryEntry[]) => {
     refreshDueCount(list);
     if (list.length === 0) {
+      learningCntRef.current.clear();
       setQuizCard(null);
       setQuizMessage("Pop quiz complete for now.");
       return;
     }
     const now = Date.now();
     const normalized = list.map(ensureScheduling);
+    const entryById = new Map(normalized.map(entry => [entry.id, entry]));
+    const learningMap = learningCntRef.current;
+    if (learningMap.size > 0) {
+      for (const id of learningMap.keys()) {
+        if (!entryById.has(id)) {
+          learningMap.delete(id);
+        }
+      }
+    }
     const sorted = [...normalized].sort(
       (a, b) => (a.nextReview ?? 0) - (b.nextReview ?? 0)
     );
-    const due = sorted.find(entry => (entry.nextReview ?? 0) <= now);
-    if (due) {
-      setQuizCard(due);
+    const isLearningBlocked = (entry: DictionaryEntry) => {
+      const cnt = learningMap.get(entry.id);
+      return cnt !== undefined && cnt > 0;
+    };
+    const dueCandidate = sorted.find(
+      entry => (entry.nextReview ?? 0) <= now && !isLearningBlocked(entry)
+    );
+    let learningCandidate: { entry: DictionaryEntry; cnt: number } | null = null;
+    if (learningMap.size > 0) {
+      let minId = '';
+      let minCnt = Infinity;
+      for (const [id, cnt] of learningMap) {
+        if (cnt < minCnt) {
+          minCnt = cnt;
+          minId = id;
+        }
+      }
+      const entry = entryById.get(minId);
+      if (entry) {
+        learningCandidate = { entry, cnt: minCnt };
+      } else if (minId) {
+        learningMap.delete(minId);
+      }
+    }
+
+    let chosen: DictionaryEntry | null = null;
+    if (learningCandidate && learningCandidate.cnt <= 0) {
+      chosen = learningCandidate.entry;
+    } else if (dueCandidate) {
+      chosen = dueCandidate;
+    } else if (learningCandidate) {
+      chosen = learningCandidate.entry;
+    }
+
+    if (chosen) {
+      learningMap.delete(chosen.id);
+      if (learningMap.size > 0) {
+        for (const [id, cnt] of learningMap) {
+          learningMap.set(id, cnt - 1);
+        }
+      }
+      setQuizCard(chosen);
       setQuizRevealed(false);
       setQuizMessage(null);
     } else {
@@ -302,8 +359,15 @@ function App({ config }: AppProps) {
     }
   };
 
+  useEffect(() => {
+    if (!pendingQuizSelectionRef.current) return;
+    pendingQuizSelectionRef.current = false;
+    selectNextQuizCard(history);
+  }, [history]);
+
   const handleQuizRepeat = () => {
     if (!quizCard) return;
+    learningCntRef.current.set(quizCard.id, LEARNING_REPEAT_CNT);
     const now = Date.now();
     setFeedback('again');
     updateHistoryWithUndo(prev => {
@@ -319,13 +383,14 @@ function App({ config }: AppProps) {
           reps: 0,
         };
       });
-      selectNextQuizCard(updated);
       return updated;
     });
+    pendingQuizSelectionRef.current = true;
   };
 
   const handleQuizHard = () => {
     if (!quizCard) return;
+    learningCntRef.current.set(quizCard.id, LEARNING_HARD_CNT);
     const now = Date.now();
     setFeedback('hard');
     updateHistoryWithUndo(prev => {
@@ -342,13 +407,14 @@ function App({ config }: AppProps) {
           nextReview: now + nextInterval,
         };
       });
-      selectNextQuizCard(updated);
       return updated;
     });
+    pendingQuizSelectionRef.current = true;
   };
 
   const handleQuizGood = () => {
     if (!quizCard) return;
+    learningCntRef.current.delete(quizCard.id);
     const now = Date.now();
     setFeedback('good');
     updateHistoryWithUndo(prev => {
@@ -367,20 +433,21 @@ function App({ config }: AppProps) {
           reps: (ensured.reps ?? 0) + 1,
         };
       });
-      selectNextQuizCard(updated);
       return updated;
     });
+    pendingQuizSelectionRef.current = true;
   };
 
   const handleQuizRemove = () => {
     if (!quizCard) return;
+    learningCntRef.current.delete(quizCard.id);
     setFeedback(null);
     setQuizRevealed(false);
     updateHistoryWithUndo(prev => {
       const updated = prev.filter(item => item.id !== quizCard.id);
-      selectNextQuizCard(updated);
       return updated;
     });
+    pendingQuizSelectionRef.current = true;
   };
 
   const handleUndoRemove = () => {
@@ -403,6 +470,7 @@ function App({ config }: AppProps) {
   };
 
   const handleDeleteHistory = (id: string) => {
+    learningCntRef.current.delete(id);
     setHistory(prev => prev.filter(item => item.id !== id));
   };
 
@@ -428,6 +496,7 @@ function App({ config }: AppProps) {
   };
 
   const counterStyles = getCounterStyles();
+  const isLuckyPending = isLuckyLoading && luckySelectedWords.length > 0 && !luckyResult;
 
   const langOptions: { id: PreferredLanguage; label: React.ReactNode; title: string; baseClass: string; activeClass: string }[] = [
     { 
@@ -658,8 +727,9 @@ function App({ config }: AppProps) {
             
             <div className="space-y-3 max-w-3xl mx-auto">
               <LuckyResultCard
-                isLoading={isLuckyLoading}
+                isLoading={isLuckyPending}
                 result={luckyResult}
+                selectedWords={luckySelectedWords}
                 onDismiss={() => setLuckyResult(null)}
               />
 
@@ -698,7 +768,7 @@ function App({ config }: AppProps) {
       </main>
       <footer className="py-8 text-center text-slate-400 text-sm">
         <div>
-          Built by fstqwq and, mostly, Gemini 3 Pro.
+          Built by fstqwq with Gemini 3 Pro and Codex.
         </div>
         <div className="mt-2">
           <a 

@@ -6,12 +6,14 @@ import { playAudio } from '../services/ttsService';
 type LuckyResultCardProps = {
   isLoading: boolean;
   result: LuckySentenceResult | null;
+  selectedWords: string[];
   onDismiss: () => void;
 };
 
 export const LuckyResultCard: React.FC<LuckyResultCardProps> = ({
   isLoading,
   result,
+  selectedWords = [],
   onDismiss,
 }) => {
   if (isLoading) {
@@ -19,6 +21,18 @@ export const LuckyResultCard: React.FC<LuckyResultCardProps> = ({
       <div className="bg-white rounded-xl shadow-sm border border-violet-100 p-6 flex flex-col items-center justify-center animate-pulse w-full">
         <Dices size={32} className="text-violet-600 animate-spin mb-2" />
         <p className="text-violet-600 font-medium text-sm">Mixing words...</p>
+        {selectedWords.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+            {selectedWords.map((word, i) => (
+              <span
+                key={`${word}-${i}`}
+                className="px-2 py-0.5 bg-violet-50 border border-violet-100 text-violet-700 rounded-md text-xs font-medium"
+              >
+                {word}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     );
   }

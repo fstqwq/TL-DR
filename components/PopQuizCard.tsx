@@ -45,7 +45,7 @@ export const PopQuizCard: React.FC<PopQuizCardProps> = ({
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-amber-600 font-semibold">
               <Lightbulb size={18} />
-              <span>Pop Quiz</span>
+              <span className="sm:block hidden">Pop Quiz</span>
             {undoAvailable && (
               <button
                 onClick={onUndoRemove}
