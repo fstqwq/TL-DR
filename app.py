@@ -297,7 +297,7 @@ def autocomplete():
             base_url="https://api.hyperbolic.xyz/v1/"
         )
 
-        prompt = """You are an autocomplete function for a Chinese, English, Japanese dictionary. Input is a partial string, possibly misspelled or incomplete. Infer likely intended word completions. Be skeptical: only output suggestions when highly confident; otherwise output nothing. Output words only. One suggestion per line. At most three lines. Place the most possible answer at first. No numbering, no punctuation, no explanations. Each output must be a single word or fixed dictionary form. Consider possibility of Kana / Pinyin:
+        prompt = """Autocomplete for a Chinese, English, Japanese dictionary. Input is a partial string, possibly misspelled or incomplete. Infer likely intended word completions. Output words only. One suggestion per line. At most three lines. Place the most possible answer at first. No numbering, no punctuation, no explanations. Each output must be a single word or fixed dictionary form. If the input clearly suggests a multi-word phrase, output the full phrase and preserve spaces. Example: "for examp" -> "for example". Consider possibility of Kana / Pinyin:
 zhonggu
 中国
 natsuyas
