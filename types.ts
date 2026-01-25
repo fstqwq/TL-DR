@@ -46,6 +46,10 @@ export interface LuckySentenceResult {
   };
 }
 
+export interface AutocompleteResult {
+  suggestions: string[];
+}
+
 export interface AppConfig {
   BACKEND_URL?: string;
   MODELS?: Array<{ id: string; name: string }>;

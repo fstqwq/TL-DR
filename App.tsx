@@ -1,6 +1,6 @@
 ﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Search, History, Sparkles, Settings2, Dices, X, HelpCircle, CornerDownLeft, Lightbulb } from 'lucide-react';
-import { lookupWord, generateSentence, setRuntimeConfig } from './services/llmService';
+import { lookupWord, generateSentence, setRuntimeConfig, autocompleteWords } from './services/llmService';
 import { playAudio } from './services/ttsService';
 import { DictionaryEntry, LuckySentenceResult, WordContext, AppConfig } from './types';
 import { WordCard } from './components/WordCard';
@@ -19,6 +19,42 @@ const HARD_MIN_INTERVAL = 3 * 60 * 1000; // 3 minutes
 const GOOD_NEW_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const LEARNING_REPEAT_CNT = 2;
 const LEARNING_HARD_CNT = 5;
+const AUTOCOMPLETE_DEBOUNCE_MS = 250;
+const AUTOCOMPLETE_MIN_CHARS = 3;
+const AUTOCOMPLETE_CJK_MIN_CHARS = 2;
+const AUTOCOMPLETE_CACHE_TTL_MS = 90 * 1000;
+
+const getAutocompleteMinChars = (value: string) =>
+  /[\u3040-\u30ff\u3400-\u9fff]/.test(value) ? AUTOCOMPLETE_CJK_MIN_CHARS : AUTOCOMPLETE_MIN_CHARS;
+
+const buildAutocompleteSegments = (suggestion: string, query: string) => {
+  const trimmedQuery = query.trim();
+  if (!suggestion || !trimmedQuery) {
+    return [{ text: suggestion, isMatch: false }];
+  }
+
+  const lowerSuggestion = suggestion.toLowerCase();
+  const lowerQuery = trimmedQuery.toLowerCase();
+  const maxLen = Math.min(lowerSuggestion.length, lowerQuery.length);
+  let prefixLen = 0;
+
+  for (let i = 0; i < maxLen; i += 1) {
+    if (lowerSuggestion[i] !== lowerQuery[i]) break;
+    prefixLen += 1;
+  }
+
+  if (prefixLen === 0) {
+    return [{ text: suggestion, isMatch: false }];
+  }
+
+  const prefix = suggestion.slice(0, prefixLen);
+  const suffix = suggestion.slice(prefixLen);
+  const segments = [{ text: prefix, isMatch: true }];
+  if (suffix) {
+    segments.push({ text: suffix, isMatch: false });
+  }
+  return segments;
+};
 
 // Default fallback models in case config is broken
 const DEFAULT_MODELS = [
@@ -40,6 +76,14 @@ function App({ config }: AppProps) {
   );
   const [query, setQuery] = useState('');
   const [preferredLang, setPreferredLang] = useState<PreferredLanguage>('auto');
+  const [autocompleteSuggestions, setAutocompleteSuggestions] = useState<string[]>([]);
+  const [isAutocompleteLoading, setIsAutocompleteLoading] = useState(false);
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(-1);
+  const autocompleteTimerRef = useRef<number | null>(null);
+  const autocompleteRequestIdRef = useRef(0);
+  const suppressAutocompleteRef = useRef(false);
+  const autocompleteCacheRef = useRef<Map<string, { suggestions: string[]; timestamp: number }>>(new Map());
+  const autocompleteAbortRef = useRef<AbortController | null>(null);
   
   // Initialize models from local storage, but validate against the current CONFIG
   // If the stored model ID no longer exists in config, fall back to the first available model.
@@ -198,22 +242,37 @@ function App({ config }: AppProps) {
     };
   }, []);
 
-  const handleSearch = useCallback(async (e?: React.FormEvent) => {
+  const handleSearch = useCallback(async (e?: React.FormEvent, overrideQuery?: string) => {
     if (e) e.preventDefault();
-    if (!query.trim()) return;
+    const normalizedQuery = (overrideQuery ?? query).trim();
+    if (!normalizedQuery) return;
 
+    if (overrideQuery !== undefined) {
+      if (normalizedQuery !== query) {
+        suppressAutocompleteRef.current = true;
+        setQuery(normalizedQuery);
+      } else {
+        suppressAutocompleteRef.current = false;
+      }
+    }
+    setAutocompleteSuggestions([]);
+    setActiveSuggestionIndex(-1);
+    if (autocompleteAbortRef.current) {
+      autocompleteAbortRef.current.abort();
+      autocompleteAbortRef.current = null;
+    }
     setIsLoading(true);
     setError(null);
     setCurrentResult(null);
 
     try {
       // Use searchModel here
-      const data = await lookupWord(query, preferredLang, searchModel);
+      const data = await lookupWord(normalizedQuery, preferredLang, searchModel);
       
       const newEntry: DictionaryEntry = {
-        id: query.trim().toLowerCase() + '_' + Date.now(), // for http deployment
+        id: normalizedQuery.toLowerCase() + '_' + Date.now(), // for http deployment
         timestamp: Date.now(),
-        query: query.trim(),
+        query: normalizedQuery,
         data: data,
         nextReview: Date.now(),
         interval: 0,
@@ -236,6 +295,115 @@ function App({ config }: AppProps) {
       setIsLoading(false);
     }
   }, [query, preferredLang, searchModel]);
+
+  useEffect(() => {
+    if (suppressAutocompleteRef.current) {
+      suppressAutocompleteRef.current = false;
+      if (autocompleteTimerRef.current) {
+        window.clearTimeout(autocompleteTimerRef.current);
+      }
+      if (autocompleteAbortRef.current) {
+        autocompleteAbortRef.current.abort();
+        autocompleteAbortRef.current = null;
+      }
+      return;
+    }
+
+    const trimmed = query.trim();
+    const minChars = getAutocompleteMinChars(trimmed);
+
+    if (autocompleteAbortRef.current) {
+      autocompleteAbortRef.current.abort();
+      autocompleteAbortRef.current = null;
+    }
+
+    if (trimmed.length < minChars) {
+      if (autocompleteTimerRef.current) {
+        window.clearTimeout(autocompleteTimerRef.current);
+      }
+      setAutocompleteSuggestions([]);
+      setActiveSuggestionIndex(-1);
+      setIsAutocompleteLoading(false);
+      return;
+    }
+
+    const cached = autocompleteCacheRef.current.get(trimmed);
+    if (cached && Date.now() - cached.timestamp < AUTOCOMPLETE_CACHE_TTL_MS) {
+      setAutocompleteSuggestions(cached.suggestions);
+      setActiveSuggestionIndex(-1);
+      setIsAutocompleteLoading(false);
+      return;
+    }
+
+    setAutocompleteSuggestions([]);
+    setActiveSuggestionIndex(-1);
+
+    if (autocompleteTimerRef.current) {
+      window.clearTimeout(autocompleteTimerRef.current);
+    }
+
+    autocompleteTimerRef.current = window.setTimeout(async () => {
+      const requestId = ++autocompleteRequestIdRef.current;
+      const controller = new AbortController();
+      autocompleteAbortRef.current = controller;
+      setIsAutocompleteLoading(true);
+      try {
+        const suggestions = await autocompleteWords(trimmed, searchModel, controller.signal);
+        if (autocompleteRequestIdRef.current !== requestId) return;
+        autocompleteCacheRef.current.set(trimmed, { suggestions, timestamp: Date.now() });
+        setAutocompleteSuggestions(suggestions);
+        setActiveSuggestionIndex(-1);
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+        if (autocompleteRequestIdRef.current !== requestId) return;
+        setAutocompleteSuggestions([]);
+        setActiveSuggestionIndex(-1);
+      } finally {
+        if (autocompleteRequestIdRef.current === requestId) {
+          setIsAutocompleteLoading(false);
+        }
+      }
+    }, AUTOCOMPLETE_DEBOUNCE_MS);
+
+    return () => {
+      if (autocompleteTimerRef.current) {
+        window.clearTimeout(autocompleteTimerRef.current);
+      }
+    };
+  }, [query, searchModel]);
+
+  const applySuggestion = useCallback((suggestion: string) => {
+    handleSearch(undefined, suggestion);
+  }, [handleSearch]);
+
+  const handleQueryKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (autocompleteSuggestions.length === 0) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setActiveSuggestionIndex(prev => {
+        const next = prev + 1;
+        return next >= autocompleteSuggestions.length ? 0 : next;
+      });
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setActiveSuggestionIndex(prev => {
+        const next = prev <= 0 ? autocompleteSuggestions.length - 1 : prev - 1;
+        return next;
+      });
+      return;
+    }
+    if (event.key === 'Escape') {
+      setAutocompleteSuggestions([]);
+      setActiveSuggestionIndex(-1);
+      return;
+    }
+    if (event.key === 'Enter' && activeSuggestionIndex >= 0) {
+      event.preventDefault();
+      applySuggestion(autocompleteSuggestions[activeSuggestionIndex]);
+    }
+  };
 
   const handleLucky = async () => {
     if (history.length < 2) {
@@ -497,6 +665,8 @@ function App({ config }: AppProps) {
 
   const counterStyles = getCounterStyles();
   const isLuckyPending = isLuckyLoading && luckySelectedWords.length > 0 && !luckyResult;
+  const trimmedQuery = query.trim();
+  const autocompleteMinChars = getAutocompleteMinChars(trimmedQuery);
 
   const langOptions: { id: PreferredLanguage; label: React.ReactNode; title: string; baseClass: string; activeClass: string }[] = [
     { 
@@ -643,8 +813,13 @@ function App({ config }: AppProps) {
               <input
                 type="text"
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setActiveSuggestionIndex(-1);
+                }}
+                onKeyDown={handleQueryKeyDown}
                 placeholder="Apple/苹果/林檎/リンゴ..."
+                autoComplete="off"
                 className="w-full pl-12 pr-4 py-4 rounded-full bg-white border-2 border-slate-300 text-gray-900 placeholder:text-slate-500 shadow-sm focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 focus:scale-[1.02] focus:shadow-md outline-none text-lg transition-all duration-300 ease-out"
               />
               <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-indigo-500 transition-colors" size={24} />
@@ -655,6 +830,39 @@ function App({ config }: AppProps) {
               >
                 {isLoading ? '...' : <CornerDownLeft size={18} />}
               </button>
+
+              {(isAutocompleteLoading || autocompleteSuggestions.length > 0) && trimmedQuery.length >= autocompleteMinChars && (
+                <div className="absolute left-0 right-0 top-full mt-2 bg-white border border-slate-200 rounded-2xl shadow-lg overflow-hidden z-10">
+                  {isAutocompleteLoading && autocompleteSuggestions.length === 0 && (
+                    <div className="px-4 py-3 text-sm text-slate-400">Searching suggestions...</div>
+                  )}
+                  {autocompleteSuggestions.map((suggestion, index) => (
+                    <button
+                      type="button"
+                      key={`${suggestion}-${index}`}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        applySuggestion(suggestion);
+                      }}
+                      onMouseEnter={() => setActiveSuggestionIndex(index)}
+                      className={`w-full text-left px-4 py-3 text-sm sm:text-base transition-colors ${
+                        index === activeSuggestionIndex
+                          ? 'bg-indigo-50 text-indigo-700'
+                          : 'text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      {buildAutocompleteSegments(suggestion, trimmedQuery).map((segment, segmentIndex) => (
+                        <span
+                          key={`${suggestion}-${segmentIndex}`}
+                          className={segment.isMatch ? 'font-semibold' : ''}
+                        >
+                          {segment.text}
+                        </span>
+                      ))}
+                    </button>
+                  ))}
+                </div>
+              )}
             </form>
           </div>
 

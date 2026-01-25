@@ -1,4 +1,4 @@
-import { DictionaryData, LuckySentenceResult, WordContext, AppConfig } from "../types";
+import { DictionaryData, LuckySentenceResult, WordContext, AppConfig, AutocompleteResult } from "../types";
 
 // --- CONFIGURATION ---
 
@@ -24,8 +24,10 @@ export const lookupWord = async (query: string, preferredLanguage: string = 'aut
 
     if (!response.ok) throw new Error(`Backend Error: ${response.statusText}`);
     return await response.json() as DictionaryData;
-  } catch (error) {
-    console.error("Backend API Error:", error);
+  } catch (error: any) {
+    if (error?.name !== 'AbortError') {
+      console.error("Backend API Error:", error);
+    }
     throw error;
   }
 };
@@ -41,6 +43,25 @@ export const generateSentence = async (words: WordContext[], model: string = 'ge
 
     if (!response.ok) throw new Error(`Backend Error: ${response.statusText}`);
     return await response.json() as LuckySentenceResult;
+  } catch (error) {
+    console.error("Backend API Error:", error);
+    throw error;
+  }
+};
+
+export const autocompleteWords = async (partialInput: string, model: string = 'gemini-2.0-flash', signal?: AbortSignal): Promise<string[]> => {
+  const timestamp = Date.now();
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/autocomplete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ partialInput, model, timestamp }),
+      signal,
+    });
+
+    if (!response.ok) throw new Error(`Backend Error: ${response.statusText}`);
+    const data = await response.json() as AutocompleteResult;
+    return Array.isArray(data.suggestions) ? data.suggestions : [];
   } catch (error) {
     console.error("Backend API Error:", error);
     throw error;

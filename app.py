@@ -58,8 +58,24 @@ def safe_json(text: str):
     except Exception:
         return {}
 
+def parse_autocomplete_suggestions(text: str):
+    if not text:
+        return []
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    suggestions = []
+    for line in lines:
+        line = re.sub(r"^[\s\-\*\d\.\)\(]+", "", line).strip()
+        if not line:
+            continue
+        if line not in suggestions:
+            suggestions.append(line)
+        if len(suggestions) >= 3:
+            break
+    return suggestions
+
 import time
 last_query = -1
+last_autocomplete_query = -1
 
 def rate_limit():
     global last_query
@@ -67,6 +83,14 @@ def rate_limit():
     if last_query != -1 and now - last_query < 1 / RATE_LIMIT * 60:
         return False
     last_query = time.time()
+    return True
+
+def rate_limit_autocomplete():
+    global last_autocomplete_query
+    now = time.time()
+    if last_autocomplete_query != -1 and now - last_autocomplete_query < 1 / RATE_LIMIT * 20:
+        return False
+    last_autocomplete_query = time.time()
     return True
 
 scraper = cloudscraper.create_scraper()
@@ -242,6 +266,56 @@ Please note the difference between Hanzi and Kanji: the same literals may have d
         content = response.choices[0].message.content
         print(f"Raw response content: {content}")
         return jsonify(safe_json(content))
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/autocomplete', methods=['POST'])
+def autocomplete():
+    if not API_KEY:
+        return jsonify({"error": "API_KEY not configured on server"}), 500
+    if not rate_limit_autocomplete():
+        return jsonify({"error": "Rate limit exceeded."}), 429
+    data = request.json or {}
+    timestamp = data.get('timestamp', 0)
+    if abs(time.time() - timestamp / 1000) > 15:
+        return jsonify({"error": "Invalid request."}), 403
+    partial_input = data.get('partialInput') or data.get('partial_input') or ""
+    partial_input = partial_input.strip()
+    if not partial_input:
+        return jsonify({"suggestions": []})
+    model = data.get('model')
+    if model not in MODELS:
+        print(f"Unsupported model requested: {model}")
+        return jsonify({"error": f"Model '{model}' not supported."}), 400
+
+    try:
+        client = OpenAI(
+            api_key=API_KEY,
+            base_url="https://api.hyperbolic.xyz/v1/"
+        )
+
+        prompt = """You are an autocomplete function for a Chinese, English, Japanese dictionary. Input is a partial string, possibly misspelled or incomplete. Infer likely intended word completions. Be skeptical: only output suggestions when highly confident; otherwise output nothing. Output words only. One suggestion per line. At most three lines. Place the most possible answer at first. No numbering, no punctuation, no explanations. Each output must be a single word or fixed dictionary form. Consider possibility of Kana / Pinyin:
+zhonggu
+中国
+natsuyas
+夏休み
+Output answer without thinking."""
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": f"{partial_input}"}
+            ],
+            temperature=0,
+            max_tokens=32,
+        )
+
+        content = response.choices[0].message.content or ""
+        suggestions = parse_autocomplete_suggestions(content)
+        return jsonify({"suggestions": suggestions})
 
     except Exception as e:
         print(f"Error: {e}")
