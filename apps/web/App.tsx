@@ -10,6 +10,17 @@ import { PopQuizCard } from './components/PopQuizCard';
 
 type PreferredLanguage = 'auto' | 'zh' | 'en' | 'ja';
 type AppProps = { config: AppConfig };
+type AutocompleteCacheEntry = {
+  suggestions: string[];
+  timestamp: number;
+  query: string;
+  language: PreferredLanguage;
+};
+type AutocompleteInFlightEntry = {
+  controller: AbortController;
+  query: string;
+  language: PreferredLanguage;
+};
 
 const MAX_HISTORY = 42;
 const DEFAULT_EASE = 2.5;
@@ -57,6 +68,8 @@ const buildAutocompleteSegments = (suggestion: string, query: string) => {
 };
 
 const normalizeAutocompleteValue = (value: string) => value.trim().toLowerCase();
+const buildAutocompleteRequestKey = (query: string, language: PreferredLanguage) =>
+  `${language}:${normalizeAutocompleteValue(query)}`;
 
 const areAutocompleteQueriesConsistent = (queryA: string, queryB: string) => {
   const normalizedA = normalizeAutocompleteValue(queryA);
@@ -85,8 +98,9 @@ const sortAutocompleteSuggestions = (suggestions: string[], query: string) => {
 };
 
 const getCachedAutocompleteSuggestions = (
-  cache: Map<string, { suggestions: string[]; timestamp: number }>,
-  query: string
+  cache: Map<string, AutocompleteCacheEntry>,
+  query: string,
+  language: PreferredLanguage
 ) => {
   const normalizedQuery = normalizeAutocompleteValue(query);
   if (!normalizedQuery) return null;
@@ -94,22 +108,23 @@ const getCachedAutocompleteSuggestions = (
   let exact: { suggestions: string[]; timestamp: number; sourceQuery: string } | null = null;
   let best: { suggestions: string[]; score: number; timestamp: number; sourceQuery: string } | null = null;
 
-  for (const [cachedQuery, entry] of cache.entries()) {
+  for (const entry of cache.values()) {
     if (now - entry.timestamp >= AUTOCOMPLETE_CACHE_TTL_MS) continue;
-    const normalizedCached = normalizeAutocompleteValue(cachedQuery);
+    if (entry.language !== language) continue;
+    const normalizedCached = normalizeAutocompleteValue(entry.query);
     if (!normalizedCached) continue;
     const isExact = normalizedCached === normalizedQuery;
     if (entry.suggestions.length === 0 && !isExact) continue;
     if (isExact) {
       if (!exact || entry.timestamp > exact.timestamp) {
-        exact = { suggestions: entry.suggestions, timestamp: entry.timestamp, sourceQuery: cachedQuery };
+        exact = { suggestions: entry.suggestions, timestamp: entry.timestamp, sourceQuery: entry.query };
       }
       continue;
     }
     if (!areAutocompleteQueriesConsistent(normalizedCached, normalizedQuery)) continue;
     const score = getAutocompleteScore(normalizedCached, normalizedQuery);
     if (!best || score > best.score || (score === best.score && entry.timestamp > best.timestamp)) {
-      best = { suggestions: entry.suggestions, score, timestamp: entry.timestamp, sourceQuery: cachedQuery };
+      best = { suggestions: entry.suggestions, score, timestamp: entry.timestamp, sourceQuery: entry.query };
     }
   }
 
@@ -150,11 +165,12 @@ function App({ config }: AppProps) {
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(-1);
   const autocompleteTimerRef = useRef<number | null>(null);
   const suppressAutocompleteRef = useRef(false);
-  const autocompleteCacheRef = useRef<Map<string, { suggestions: string[]; timestamp: number }>>(new Map());
-  const autocompleteInFlightRef = useRef<Map<string, AbortController>>(new Map());
+  const autocompleteCacheRef = useRef<Map<string, AutocompleteCacheEntry>>(new Map());
+  const autocompleteInFlightRef = useRef<Map<string, AutocompleteInFlightEntry>>(new Map());
   const autocompleteSuggestionsRef = useRef<string[]>([]);
   const autocompleteSourceQueryRef = useRef<string | null>(null);
   const latestQueryRef = useRef('');
+  const latestPreferredLangRef = useRef<PreferredLanguage>('auto');
   
   // Initialize models from local storage, but validate against the current CONFIG
   // If the stored model ID no longer exists in config, fall back to the first available model.
@@ -321,10 +337,14 @@ function App({ config }: AppProps) {
     latestQueryRef.current = query;
   }, [query]);
 
+  useEffect(() => {
+    latestPreferredLangRef.current = preferredLang;
+  }, [preferredLang]);
+
   const abortAutocompleteRequests = useCallback(() => {
     if (autocompleteInFlightRef.current.size === 0) return;
-    for (const controller of autocompleteInFlightRef.current.values()) {
-      controller.abort();
+    for (const request of autocompleteInFlightRef.current.values()) {
+      request.controller.abort();
     }
     autocompleteInFlightRef.current.clear();
   }, []);
@@ -370,7 +390,10 @@ function App({ config }: AppProps) {
       
       // Add to history (prevent duplicates based on the targetWord)
       setHistory(prev => {
-        const filtered = prev.filter(item => item.data.targetWord.toLowerCase() !== data.targetWord.toLowerCase());
+        const normalizedTargetWord = (data?.targetWord ?? normalizedQuery).toLowerCase();
+        const filtered = prev.filter(
+          (item) => (item?.data?.targetWord ?? "").toLowerCase() !== normalizedTargetWord
+        );
         return [newEntry, ...filtered].slice(0, MAX_HISTORY); // Keep max items defined by MAX_HISTORY
       });
 
@@ -381,6 +404,17 @@ function App({ config }: AppProps) {
       setIsLoading(false);
     }
   }, [query, preferredLang, searchModel, abortAutocompleteRequests]);
+
+  useEffect(() => {
+    if (autocompleteTimerRef.current) {
+      window.clearTimeout(autocompleteTimerRef.current);
+    }
+    abortAutocompleteRequests();
+    setAutocompleteSuggestions([]);
+    setActiveSuggestionIndex(-1);
+    autocompleteSourceQueryRef.current = null;
+    setIsAutocompleteLoading(false);
+  }, [preferredLang, abortAutocompleteRequests]);
 
   useEffect(() => {
     if (suppressAutocompleteRef.current) {
@@ -408,10 +442,10 @@ function App({ config }: AppProps) {
       return;
     }
 
-    for (const [requestQuery, controller] of autocompleteInFlightRef.current.entries()) {
-      if (!areAutocompleteQueriesConsistent(requestQuery, trimmed)) {
-        controller.abort();
-        autocompleteInFlightRef.current.delete(requestQuery);
+    for (const [requestKey, request] of autocompleteInFlightRef.current.entries()) {
+      if (request.language !== preferredLang || !areAutocompleteQueriesConsistent(request.query, trimmed)) {
+        request.controller.abort();
+        autocompleteInFlightRef.current.delete(requestKey);
       }
     }
     if (autocompleteInFlightRef.current.size === 0) {
@@ -424,7 +458,7 @@ function App({ config }: AppProps) {
       setActiveSuggestionIndex(-1);
     }
 
-    const cached = getCachedAutocompleteSuggestions(autocompleteCacheRef.current, trimmed);
+    const cached = getCachedAutocompleteSuggestions(autocompleteCacheRef.current, trimmed, preferredLang);
     const isExactCached =
       !!cached && normalizeAutocompleteValue(cached.sourceQuery) === normalizeAutocompleteValue(trimmed);
     if (cached && (autocompleteSuggestionsRef.current.length === 0 || isExactCached)) {
@@ -441,14 +475,22 @@ function App({ config }: AppProps) {
     }
 
     autocompleteTimerRef.current = window.setTimeout(async () => {
-      if (autocompleteInFlightRef.current.has(trimmed)) return;
+      const requestKey = buildAutocompleteRequestKey(trimmed, preferredLang);
+      if (autocompleteInFlightRef.current.has(requestKey)) return;
       const controller = new AbortController();
-      autocompleteInFlightRef.current.set(trimmed, controller);
+      autocompleteInFlightRef.current.set(requestKey, { controller, query: trimmed, language: preferredLang });
       setIsAutocompleteLoading(true);
       try {
-        const suggestions = await autocompleteWords(trimmed, searchModel, controller.signal);
-        autocompleteCacheRef.current.set(trimmed, { suggestions, timestamp: Date.now() });
+        const suggestions = await autocompleteWords(trimmed, searchModel, preferredLang, controller.signal);
+        autocompleteCacheRef.current.set(requestKey, {
+          suggestions,
+          timestamp: Date.now(),
+          query: trimmed,
+          language: preferredLang,
+        });
         const currentQuery = latestQueryRef.current.trim();
+        const currentPreferredLang = latestPreferredLangRef.current;
+        if (currentPreferredLang !== preferredLang) return;
         const currentMinChars = getAutocompleteMinChars(currentQuery);
         if (currentQuery.length < currentMinChars) return;
         if (!areAutocompleteQueriesConsistent(trimmed, currentQuery)) return;
@@ -462,7 +504,7 @@ function App({ config }: AppProps) {
       } catch (err: any) {
         if (err?.name === 'AbortError') return;
       } finally {
-        autocompleteInFlightRef.current.delete(trimmed);
+        autocompleteInFlightRef.current.delete(requestKey);
         if (autocompleteInFlightRef.current.size === 0) {
           setIsAutocompleteLoading(false);
         }
@@ -474,7 +516,7 @@ function App({ config }: AppProps) {
         window.clearTimeout(autocompleteTimerRef.current);
       }
     };
-  }, [query, searchModel, abortAutocompleteRequests]);
+  }, [query, searchModel, preferredLang, abortAutocompleteRequests]);
 
   const applySuggestion = useCallback((suggestion: string) => {
     handleSearch(undefined, suggestion);
@@ -515,7 +557,7 @@ function App({ config }: AppProps) {
     const minChars = getAutocompleteMinChars(trimmed);
     if (trimmed.length < minChars) return;
 
-    const cached = getCachedAutocompleteSuggestions(autocompleteCacheRef.current, trimmed);
+    const cached = getCachedAutocompleteSuggestions(autocompleteCacheRef.current, trimmed, preferredLang);
     if (cached) {
       autocompleteSourceQueryRef.current = cached.sourceQuery;
       setAutocompleteSuggestions(sortAutocompleteSuggestions(cached.suggestions, trimmed) ?? cached.suggestions);
@@ -528,7 +570,7 @@ function App({ config }: AppProps) {
       setAutocompleteSuggestions(reorderedExisting);
       setActiveSuggestionIndex(-1);
     }
-  }, [query]);
+  }, [query, preferredLang]);
 
   const handleQueryBlur = useCallback(() => {
     setIsAutocompleteOpen(false);

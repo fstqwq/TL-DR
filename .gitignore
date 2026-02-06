@@ -13,6 +13,7 @@ dist-ssr
 *.local
 package-lock.json
 public/config.json
+apps/web/public/config.json
 *.zip
 
 # Editor directories and files
@@ -37,3 +38,4 @@ env
 
 test_files/
 .vite/
+apps/web/.vite/

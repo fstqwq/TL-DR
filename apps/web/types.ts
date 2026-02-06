@@ -53,4 +53,5 @@ export interface AutocompleteResult {
 export interface AppConfig {
   BACKEND_URL?: string;
   MODELS?: Array<{ id: string; name: string }>;
+  FAST_MODEL?: string;
 }

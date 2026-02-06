@@ -1,6 +1,6 @@
 <div align="center">
     <a href="https://github.com/fstqwq/TL-DR">
-        <img src="./public/favicon.svg" alt="TL;DR Logo" width="100" height="100"/>
+        <img src="./apps/web/public/favicon.svg" alt="TL;DR Logo" width="100" height="100"/>
     </a>
 </div>
 
@@ -30,9 +30,14 @@ You can try the demo [here](http://anon.fstqwq.pw/). Please be gentle, as my wal
 
 ## Deployment
 
+### Repository Structure
+
+- Frontend: `apps/web`
+- Backend: `apps/api`
+
 ### Frontend Setup
 
-Create `public/config.json` based on `config_example.json`.
+Create `apps/web/public/config.json` based on `apps/web/config_example.json`.
 *   **BACKEND_URL**: The URL of the backend API. For local usage, this should be `http://127.0.0.1:5000`.
 *   **MODELS**: A list of available LLM models.
 
@@ -40,18 +45,22 @@ Then, run the following command to build the frontend:
 ```bash
 npm run build
 ```
-Place the contents of the `dist` folder on your web server.
+Or directly:
+```bash
+npm --prefix apps/web run build
+```
+Place the contents of `apps/web/dist` on your web server.
 
 ### Backend Setup
 
 1.  **Install Python requirements:**
     ```bash
-    pip install -r requirements.txt
+    pip install -r apps/api/requirements.txt
     ```
 
 2.  **Run the Backend Server:**
     ```bash
-    API_KEY=your_api_key_here BASE_URL=https://api.your-llm-provider.com/ RATE_LIMIT=60 CONFIG_PATH=./path/to/your/config.json python app.py
+    API_KEY=your_api_key_here BASE_URL=https://api.your-llm-provider.com/ RATE_LIMIT=60 python apps/api/app.py
     ```
     *You should see "Running on http://127.0.0.1:5000"*
 
