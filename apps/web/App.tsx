@@ -185,6 +185,15 @@ function App({ config }: AppProps) {
     const exists = models.find(m => m.id === stored);
     return exists ? stored! : models[0].id;
   });
+
+  useEffect(() => {
+    if (!models.some(model => model.id === searchModel)) {
+      setSearchModel(models[0].id);
+    }
+    if (!models.some(model => model.id === luckyModel)) {
+      setLuckyModel(models[0].id);
+    }
+  }, [models, searchModel, luckyModel]);
   
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);

@@ -11,6 +11,7 @@ type PopQuizCardProps = {
   quizRevealed: boolean;
   feedbackEffect: 'again' | 'hard' | 'good' | null;
   undoAvailable: boolean;
+  dueCount: number;
   onClose: () => void;
   onReveal: () => void;
   onRepeat: () => void;
