@@ -1,17 +1,19 @@
 ﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Search, History, Sparkles, Settings2, Dices, X, HelpCircle, CornerDownLeft, Lightbulb } from 'lucide-react';
-import { lookupWord, generateSentence, setRuntimeConfig, autocompleteWords } from './services/llmService';
+import { lookupWord, generateSentence, setRuntimeConfig, autocompleteWordsStream } from './services/llmService';
 import { playAudio } from './services/ttsService';
-import { DictionaryEntry, LuckySentenceResult, WordContext, AppConfig } from './types';
+import { DictionaryEntry, LuckySentenceResult, WordContext, AppConfig, LookupSource } from './types';
 import { WordCard } from './components/WordCard';
 import { Spinner } from './components/Spinner';
 import { LuckyResultCard } from './components/LuckyResultCard';
 import { PopQuizCard } from './components/PopQuizCard';
+import { LookupSources } from './components/LookupSources';
 
 type PreferredLanguage = 'auto' | 'zh' | 'en' | 'ja';
 type AppProps = { config: AppConfig };
 type AutocompleteCacheEntry = {
-  suggestions: string[];
+  localSuggestions: string[];
+  apiSuggestions: string[];
   timestamp: number;
   query: string;
   language: PreferredLanguage;
@@ -20,6 +22,10 @@ type AutocompleteInFlightEntry = {
   controller: AbortController;
   query: string;
   language: PreferredLanguage;
+};
+type AutocompleteSuggestionItem = {
+  text: string;
+  source: 'local' | 'api';
 };
 
 const MAX_HISTORY = 42;
@@ -71,30 +77,32 @@ const normalizeAutocompleteValue = (value: string) => value.trim().toLowerCase()
 const buildAutocompleteRequestKey = (query: string, language: PreferredLanguage) =>
   `${language}:${normalizeAutocompleteValue(query)}`;
 
+const buildAutocompleteSuggestionItems = (
+  localSuggestions: string[],
+  apiSuggestions: string[]
+): AutocompleteSuggestionItem[] => {
+  const merged: AutocompleteSuggestionItem[] = [];
+  const seen = new Set<string>();
+  for (const suggestion of localSuggestions) {
+    const key = normalizeAutocompleteValue(suggestion);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ text: suggestion, source: 'local' });
+  }
+  for (const suggestion of apiSuggestions) {
+    const key = normalizeAutocompleteValue(suggestion);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ text: suggestion, source: 'api' });
+  }
+  return merged;
+};
+
 const areAutocompleteQueriesConsistent = (queryA: string, queryB: string) => {
   const normalizedA = normalizeAutocompleteValue(queryA);
   const normalizedB = normalizeAutocompleteValue(queryB);
   if (!normalizedA || !normalizedB) return false;
   return normalizedA.startsWith(normalizedB) || normalizedB.startsWith(normalizedA);
-};
-
-const getPerfectMatchIndex = (suggestions: string[], query: string) => {
-  const normalizedQuery = normalizeAutocompleteValue(query);
-  if (!normalizedQuery) return -1;
-  return suggestions.findIndex(
-    (suggestion) => normalizeAutocompleteValue(suggestion) === normalizedQuery
-  );
-};
-
-const sortAutocompleteSuggestions = (suggestions: string[], query: string) => {
-  if (suggestions.length === 0) return null;
-  const matchIndex = getPerfectMatchIndex(suggestions, query);
-  if (matchIndex <= 0) return null;
-  return [
-    suggestions[matchIndex],
-    ...suggestions.slice(0, matchIndex),
-    ...suggestions.slice(matchIndex + 1),
-  ];
 };
 
 const getCachedAutocompleteSuggestions = (
@@ -105,31 +113,49 @@ const getCachedAutocompleteSuggestions = (
   const normalizedQuery = normalizeAutocompleteValue(query);
   if (!normalizedQuery) return null;
   const now = Date.now();
-  let exact: { suggestions: string[]; timestamp: number; sourceQuery: string } | null = null;
-  let best: { suggestions: string[]; score: number; timestamp: number; sourceQuery: string } | null = null;
+  let exact: { localSuggestions: string[]; apiSuggestions: string[]; timestamp: number; sourceQuery: string } | null = null;
+  let best: { localSuggestions: string[]; apiSuggestions: string[]; score: number; timestamp: number; sourceQuery: string } | null = null;
 
   for (const entry of cache.values()) {
     if (now - entry.timestamp >= AUTOCOMPLETE_CACHE_TTL_MS) continue;
     if (entry.language !== language) continue;
     const normalizedCached = normalizeAutocompleteValue(entry.query);
     if (!normalizedCached) continue;
+    const mergedSuggestions = buildAutocompleteSuggestionItems(entry.localSuggestions, entry.apiSuggestions);
     const isExact = normalizedCached === normalizedQuery;
-    if (entry.suggestions.length === 0 && !isExact) continue;
+    if (mergedSuggestions.length === 0 && !isExact) continue;
     if (isExact) {
       if (!exact || entry.timestamp > exact.timestamp) {
-        exact = { suggestions: entry.suggestions, timestamp: entry.timestamp, sourceQuery: entry.query };
+        exact = {
+          localSuggestions: entry.localSuggestions,
+          apiSuggestions: entry.apiSuggestions,
+          timestamp: entry.timestamp,
+          sourceQuery: entry.query,
+        };
       }
       continue;
     }
     if (!areAutocompleteQueriesConsistent(normalizedCached, normalizedQuery)) continue;
     const score = getAutocompleteScore(normalizedCached, normalizedQuery);
     if (!best || score > best.score || (score === best.score && entry.timestamp > best.timestamp)) {
-      best = { suggestions: entry.suggestions, score, timestamp: entry.timestamp, sourceQuery: entry.query };
+      best = {
+        localSuggestions: entry.localSuggestions,
+        apiSuggestions: entry.apiSuggestions,
+        score,
+        timestamp: entry.timestamp,
+        sourceQuery: entry.query,
+      };
     }
   }
 
   const chosen = exact ?? best;
-  return chosen ? { suggestions: chosen.suggestions, sourceQuery: chosen.sourceQuery } : null;
+  return chosen
+    ? {
+        localSuggestions: chosen.localSuggestions,
+        apiSuggestions: chosen.apiSuggestions,
+        sourceQuery: chosen.sourceQuery,
+      }
+    : null;
 };
 
 const getAutocompleteScore = (sourceQuery: string | null, currentQuery: string) => {
@@ -159,7 +185,7 @@ function App({ config }: AppProps) {
   );
   const [query, setQuery] = useState('');
   const [preferredLang, setPreferredLang] = useState<PreferredLanguage>('auto');
-  const [autocompleteSuggestions, setAutocompleteSuggestions] = useState<string[]>([]);
+  const [autocompleteSuggestions, setAutocompleteSuggestions] = useState<AutocompleteSuggestionItem[]>([]);
   const [isAutocompleteLoading, setIsAutocompleteLoading] = useState(false);
   const [isAutocompleteOpen, setIsAutocompleteOpen] = useState(false);
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(-1);
@@ -167,10 +193,11 @@ function App({ config }: AppProps) {
   const suppressAutocompleteRef = useRef(false);
   const autocompleteCacheRef = useRef<Map<string, AutocompleteCacheEntry>>(new Map());
   const autocompleteInFlightRef = useRef<Map<string, AutocompleteInFlightEntry>>(new Map());
-  const autocompleteSuggestionsRef = useRef<string[]>([]);
+  const autocompleteSuggestionsRef = useRef<AutocompleteSuggestionItem[]>([]);
   const autocompleteSourceQueryRef = useRef<string | null>(null);
   const latestQueryRef = useRef('');
   const latestPreferredLangRef = useRef<PreferredLanguage>('auto');
+  const lookupAbortRef = useRef<AbortController | null>(null);
   
   // Initialize models from local storage, but validate against the current CONFIG
   // If the stored model ID no longer exists in config, fall back to the first available model.
@@ -199,6 +226,8 @@ function App({ config }: AppProps) {
   const settingsRef = useRef<HTMLDivElement>(null);
 
   const [isLoading, setIsLoading] = useState(false);
+  const [lookupProgressMessage, setLookupProgressMessage] = useState<string | null>(null);
+  const [lookupSources, setLookupSources] = useState<LookupSource[]>([]);
   const [isLuckyLoading, setIsLuckyLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
@@ -322,6 +351,7 @@ function App({ config }: AppProps) {
       if (feedbackTimerRef.current) {
         window.clearTimeout(feedbackTimerRef.current);
       }
+      lookupAbortRef.current?.abort();
     };
   }, []);
 
@@ -375,20 +405,35 @@ function App({ config }: AppProps) {
     setActiveSuggestionIndex(-1);
     abortAutocompleteRequests();
     autocompleteSourceQueryRef.current = null;
+    lookupAbortRef.current?.abort();
+    const controller = new AbortController();
+    lookupAbortRef.current = controller;
     setIsAutocompleteLoading(false);
     setIsLoading(true);
+    setLookupProgressMessage('Preparing search');
+    setLookupSources([]);
     setError(null);
     setCurrentResult(null);
 
     try {
+      let receivedSources: LookupSource[] = [];
       // Use searchModel here
-      const data = await lookupWord(normalizedQuery, preferredLang, searchModel);
+      const data = await lookupWord(normalizedQuery, preferredLang, searchModel, controller.signal, {
+        onProgress: (_stage, message) => {
+          setLookupProgressMessage(message || 'Searching');
+        },
+        onSources: (sources) => {
+          receivedSources = sources;
+          setLookupSources(sources);
+        },
+      });
       
       const newEntry: DictionaryEntry = {
         id: normalizedQuery.toLowerCase() + '_' + Date.now(), // for http deployment
         timestamp: Date.now(),
         query: normalizedQuery,
         data: data,
+        lookupSources: receivedSources,
         nextReview: Date.now(),
         interval: 0,
         ease: DEFAULT_EASE,
@@ -396,6 +441,10 @@ function App({ config }: AppProps) {
       };
 
       setCurrentResult(newEntry);
+      const historyEntry: DictionaryEntry = {
+        ...newEntry,
+        lookupSources: undefined,
+      };
       
       // Add to history (prevent duplicates based on the targetWord)
       setHistory(prev => {
@@ -403,14 +452,20 @@ function App({ config }: AppProps) {
         const filtered = prev.filter(
           (item) => (item?.data?.targetWord ?? "").toLowerCase() !== normalizedTargetWord
         );
-        return [newEntry, ...filtered].slice(0, MAX_HISTORY); // Keep max items defined by MAX_HISTORY
+        return [historyEntry, ...filtered].slice(0, MAX_HISTORY); // Keep max items defined by MAX_HISTORY
       });
 
     } catch (err: any) {
-      setError(err.message || "Failed to look up the word. Please check your connection or API key.");
-      console.error(err);
+      if (err?.name !== 'AbortError') {
+        setError(err.message || "Failed to look up the word. Please check your connection or API key.");
+        console.error(err);
+      }
     } finally {
+      if (lookupAbortRef.current === controller) {
+        lookupAbortRef.current = null;
+      }
       setIsLoading(false);
+      setLookupProgressMessage(null);
     }
   }, [query, preferredLang, searchModel, abortAutocompleteRequests]);
 
@@ -461,19 +516,14 @@ function App({ config }: AppProps) {
       setIsAutocompleteLoading(false);
     }
 
-    const reorderedExisting = sortAutocompleteSuggestions(autocompleteSuggestionsRef.current, trimmed);
-    if (reorderedExisting) {
-      setAutocompleteSuggestions(reorderedExisting);
-      setActiveSuggestionIndex(-1);
-    }
-
     const cached = getCachedAutocompleteSuggestions(autocompleteCacheRef.current, trimmed, preferredLang);
     const isExactCached =
       !!cached && normalizeAutocompleteValue(cached.sourceQuery) === normalizeAutocompleteValue(trimmed);
     if (cached && (autocompleteSuggestionsRef.current.length === 0 || isExactCached)) {
-      const reorderedCached = sortAutocompleteSuggestions(cached.suggestions, trimmed);
       autocompleteSourceQueryRef.current = cached.sourceQuery;
-      setAutocompleteSuggestions(reorderedCached ?? cached.suggestions);
+      setAutocompleteSuggestions(
+        buildAutocompleteSuggestionItems(cached.localSuggestions, cached.apiSuggestions)
+      );
       setActiveSuggestionIndex(-1);
       setIsAutocompleteLoading(autocompleteInFlightRef.current.size > 0);
       return;
@@ -489,27 +539,54 @@ function App({ config }: AppProps) {
       const controller = new AbortController();
       autocompleteInFlightRef.current.set(requestKey, { controller, query: trimmed, language: preferredLang });
       setIsAutocompleteLoading(true);
-      try {
-        const suggestions = await autocompleteWords(trimmed, searchModel, preferredLang, controller.signal);
-        autocompleteCacheRef.current.set(requestKey, {
-          suggestions,
+
+      const applyAutocompleteStage = (
+        stage: 'localSuggestions' | 'apiSuggestions',
+        stageSuggestions: string[]
+      ) => {
+        const previousEntry = autocompleteCacheRef.current.get(requestKey);
+        const nextEntry: AutocompleteCacheEntry = {
+          localSuggestions: previousEntry?.localSuggestions ?? [],
+          apiSuggestions: previousEntry?.apiSuggestions ?? [],
           timestamp: Date.now(),
           query: trimmed,
           language: preferredLang,
-        });
+        };
+        nextEntry[stage] = stageSuggestions;
+        autocompleteCacheRef.current.set(requestKey, nextEntry);
+
         const currentQuery = latestQueryRef.current.trim();
         const currentPreferredLang = latestPreferredLangRef.current;
         if (currentPreferredLang !== preferredLang) return;
         const currentMinChars = getAutocompleteMinChars(currentQuery);
         if (currentQuery.length < currentMinChars) return;
         if (!areAutocompleteQueriesConsistent(trimmed, currentQuery)) return;
+
         const existingScore = getAutocompleteScore(autocompleteSourceQueryRef.current, currentQuery);
         const incomingScore = getAutocompleteScore(trimmed, currentQuery);
         if (incomingScore < existingScore) return;
-        const reordered = sortAutocompleteSuggestions(suggestions, currentQuery);
+
+        const mergedSuggestions = buildAutocompleteSuggestionItems(
+          nextEntry.localSuggestions,
+          nextEntry.apiSuggestions
+        );
         autocompleteSourceQueryRef.current = trimmed;
-        setAutocompleteSuggestions(reordered ?? suggestions);
+        setAutocompleteSuggestions(mergedSuggestions);
         setActiveSuggestionIndex(-1);
+      };
+
+      try {
+        await autocompleteWordsStream(trimmed, preferredLang, controller.signal, {
+            onLocal: (suggestions) => {
+              applyAutocompleteStage('localSuggestions', suggestions);
+            },
+          onApi: (suggestions) => {
+            applyAutocompleteStage('apiSuggestions', suggestions);
+          },
+          onError: (_stage, message) => {
+            console.warn('Autocomplete stream error:', message);
+          },
+        });
       } catch (err: any) {
         if (err?.name === 'AbortError') return;
       } finally {
@@ -556,7 +633,7 @@ function App({ config }: AppProps) {
     }
     if (event.key === 'Enter' && activeSuggestionIndex >= 0) {
       event.preventDefault();
-      applySuggestion(autocompleteSuggestions[activeSuggestionIndex]);
+      applySuggestion(autocompleteSuggestions[activeSuggestionIndex].text);
     }
   };
 
@@ -569,15 +646,11 @@ function App({ config }: AppProps) {
     const cached = getCachedAutocompleteSuggestions(autocompleteCacheRef.current, trimmed, preferredLang);
     if (cached) {
       autocompleteSourceQueryRef.current = cached.sourceQuery;
-      setAutocompleteSuggestions(sortAutocompleteSuggestions(cached.suggestions, trimmed) ?? cached.suggestions);
+      setAutocompleteSuggestions(
+        buildAutocompleteSuggestionItems(cached.localSuggestions, cached.apiSuggestions)
+      );
       setActiveSuggestionIndex(-1);
       return;
-    }
-
-    const reorderedExisting = sortAutocompleteSuggestions(autocompleteSuggestionsRef.current, trimmed);
-    if (reorderedExisting) {
-      setAutocompleteSuggestions(reorderedExisting);
-      setActiveSuggestionIndex(-1);
     }
   }, [query, preferredLang]);
 
@@ -1022,26 +1095,39 @@ function App({ config }: AppProps) {
                   {autocompleteSuggestions.map((suggestion, index) => (
                     <button
                       type="button"
-                      key={`${suggestion}-${index}`}
+                      key={`${suggestion.source}-${suggestion.text}-${index}`}
                       onMouseDown={(event) => {
                         event.preventDefault();
-                        applySuggestion(suggestion);
+                        applySuggestion(suggestion.text);
                       }}
                       onMouseEnter={() => setActiveSuggestionIndex(index)}
                       className={`w-full text-left px-4 py-3 text-sm sm:text-base transition-colors ${
                         index === activeSuggestionIndex
-                          ? 'bg-indigo-50 text-indigo-700'
-                          : 'text-slate-700 hover:bg-slate-50'
+                          ? suggestion.source === 'api'
+                            ? 'bg-violet-50 text-violet-700'
+                            : 'bg-indigo-50 text-indigo-700'
+                          : suggestion.source === 'api'
+                            ? 'text-violet-700 hover:bg-violet-50/70'
+                            : 'text-slate-700 hover:bg-slate-50'
                       }`}
                     >
-                      {buildAutocompleteSegments(suggestion, trimmedQuery).map((segment, segmentIndex) => (
-                        <span
-                          key={`${suggestion}-${segmentIndex}`}
-                          className={segment.isMatch ? 'font-semibold' : ''}
-                        >
-                          {segment.text}
+                      <div className="flex items-center justify-between gap-3">
+                        <span>
+                          {buildAutocompleteSegments(suggestion.text, trimmedQuery).map((segment, segmentIndex) => (
+                            <span
+                              key={`${suggestion.text}-${segmentIndex}`}
+                              className={segment.isMatch ? 'font-semibold' : ''}
+                            >
+                              {segment.text}
+                            </span>
+                          ))}
                         </span>
-                      ))}
+                        {suggestion.source === 'api' && (
+                          <span className="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700">
+                            LLM
+                          </span>
+                        )}
+                      </div>
                     </button>
                   ))}
                 </div>
@@ -1058,10 +1144,27 @@ function App({ config }: AppProps) {
 
         {/* Current Result (Always Visible) */}
         <section>
-          {isLoading && <Spinner />}
+          {isLoading && (
+            <div className="space-y-4">
+              <Spinner />
+              {lookupProgressMessage && (
+                <p className="text-center text-sm text-slate-500">{lookupProgressMessage}</p>
+              )}
+              {lookupSources.length > 0 && (
+                <div className="mx-auto w-full max-w-2xl">
+                  <LookupSources sources={lookupSources} />
+                </div>
+              )}
+            </div>
+          )}
           {!isLoading && currentResult && (
             <div className="animate-fade-in-up">
               <WordCard entry={currentResult} />
+            </div>
+          )}
+          {!isLoading && !currentResult && lookupSources.length > 0 && (
+            <div className="mx-auto w-full max-w-2xl animate-fade-in-up">
+              <LookupSources sources={lookupSources} />
             </div>
           )}
         </section>

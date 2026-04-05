@@ -64,5 +64,25 @@ Place the contents of `apps/web/dist` on your web server.
     ```
     *You should see "Running on http://127.0.0.1:5000"*
 
-3. **For public usage:**
+3.  **Optional local autocomplete index:**
+    The backend can serve a local-first autocomplete stage before the remote LLM stage. It looks for a generated local autocomplete file at:
+    - default path: `apps/api/data/autocomplete.compact.xz`
+    - override env var: `AUTOCOMPLETE_INDEX_PATH`
+
+    This generated file is intentionally not committed to git. If the file is missing, `/api/autocomplete` still works, but the initial `local` SSE event will return an empty suggestion list.
+
+    Build it with:
+    ```bash
+    pip install -r apps/api/requirements-build.txt
+    python apps/api/scripts/build_autocomplete_index.py
+    ```
+
+    See [apps/api/README.md](apps/api/README.md) for:
+    - where the source datasets and generated file should live
+    - the single build command that downloads missing source lexicons and writes the generated file
+    - how to point the backend at it
+    - what the SSE responses look like
+    - the upstream dataset sources and licence notes for the local autocomplete build
+
+4. **For public usage:**
     If you decide to deploy the backend server for public usage, consider modifying the authentication logic in `app.py` and use a WSGI server like Gunicorn. At least, you should not expose it directly without a reverse proxy like Nginx.

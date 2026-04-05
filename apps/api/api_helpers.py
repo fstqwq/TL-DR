@@ -91,11 +91,27 @@ def safe_json(text: str):
 def parse_autocomplete_suggestions(text: str):
     if not text:
         return []
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    candidate = str(text).replace("\ufeff", "").strip()
+    if "</think>" in candidate:
+        candidate = candidate.split("</think>")[-1].strip()
+    if candidate.startswith("<think>"):
+        return []
+    if "```" in candidate:
+        fenced = re.findall(r"```(?:\w+)?\s*([\s\S]*?)```", candidate, flags=re.IGNORECASE)
+        if fenced:
+            candidate = fenced[0].strip()
+        else:
+            candidate = candidate.replace("```", "").strip()
+    lines = [line.strip() for line in candidate.splitlines() if line.strip()]
     suggestions = []
     for line in lines:
         line = re.sub(r"^[\s\-\*\d\.\)\(]+", "", line).strip()
         if not line:
+            continue
+        if line.startswith("<"):
+            continue
+        lowered = line.lower()
+        if lowered.startswith(("input:", "language:", "output:", "suggestions:", "completion:", "example:")):
             continue
         if line not in suggestions:
             suggestions.append(line)
@@ -119,7 +135,11 @@ def _http_get_text(url: str, source: str, timeout: float = HTTP_TIMEOUT_SECONDS)
     if response.status_code != 200:
         logger.warning("api_helper_request_non_200 source=%s status=%s", source, response.status_code)
         return ""
-    response.encoding = response.apparent_encoding or "utf-8"
+    content_type = str(response.headers.get("content-type", "")).lower()
+    if "application/json" in content_type:
+        response.encoding = "utf-8"
+    elif not response.encoding:
+        response.encoding = response.apparent_encoding or "utf-8"
     return response.text or ""
 
 
@@ -185,7 +205,7 @@ def _format_dictionaryapi_payload(text: str) -> str:
 
     if not parts:
         return ""
-    return ("dictionaryapi.dev\n" + "\n".join(parts))[:MAX_SOURCE_CHARS]
+    return "\n".join(parts)[:MAX_SOURCE_CHARS]
 
 
 def _format_jisho_payload(text: str) -> str:
@@ -227,7 +247,7 @@ def _format_jisho_payload(text: str) -> str:
 
     if not lines:
         return ""
-    return ("jisho.org\n" + "\n".join(lines))[:MAX_SOURCE_CHARS]
+    return "\n".join(lines)[:MAX_SOURCE_CHARS]
 
 
 def _format_wiktionary_raw(text: str) -> str:
@@ -244,7 +264,7 @@ def _format_wiktionary_raw(text: str) -> str:
     cleaned = _clean_wiktionary_markup(text)
     if not cleaned:
         return ""
-    return ("wiktionary(raw)\n" + cleaned)[:MAX_SOURCE_CHARS]
+    return cleaned[:MAX_SOURCE_CHARS]
 
 
 def _format_weblio_html(text: str) -> str:
@@ -257,48 +277,70 @@ def _format_weblio_html(text: str) -> str:
     content = kiji.get_text(strip=True, separator="")
     if not content:
         return ""
-    return ("weblio\n" + content[:MAX_SOURCE_CHARS])[:MAX_SOURCE_CHARS]
+    return content[:MAX_SOURCE_CHARS]
 
 
-def _try_fetch_text(url: str, source: str) -> str:
+def _try_fetch_text(url: str, source: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> str:
     try:
-        return _http_get_text(url, source=source)
+        return _http_get_text(url, source=source, timeout=timeout)
     except Exception:
         logger.error("api_helper_request_failed source=%s url=%s", source, url)
         return ""
 
 
-async def _fetch_dictionaryapi_source(word: str) -> str:
-    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{quote(word)}"
-    text = await asyncio.to_thread(_try_fetch_text, url, "dictionaryapi")
-    return _format_dictionaryapi_payload(text)
+LOOKUP_SOURCE_SPECS = (
+    {
+        "id": "dictionaryapi",
+        "name": "dictionaryapi.dev",
+        "fetch_url": lambda word: f"https://api.dictionaryapi.dev/api/v2/entries/en/{quote(word)}",
+        "page_url": lambda word: f"https://api.dictionaryapi.dev/api/v2/entries/en/{quote(word)}",
+        "formatter": _format_dictionaryapi_payload,
+    },
+    {
+        "id": "jisho",
+        "name": "Jisho",
+        "fetch_url": lambda word: f"https://jisho.org/api/v1/search/words?keyword={quote(word)}",
+        "page_url": lambda word: f"https://jisho.org/search/{quote(word)}",
+        "formatter": _format_jisho_payload,
+    },
+    {
+        "id": "wiktionary",
+        "name": "Wiktionary",
+        "fetch_url": lambda word: f"https://en.wiktionary.org/w/index.php?title={quote(word)}&action=raw",
+        "page_url": lambda word: f"https://en.wiktionary.org/wiki/{quote(word)}",
+        "formatter": _format_wiktionary_raw,
+    },
+    {
+        "id": "weblio",
+        "name": "Weblio",
+        "fetch_url": lambda word: f"https://www.weblio.jp/content/{quote(word)}",
+        "page_url": lambda word: f"https://www.weblio.jp/content/{quote(word)}",
+        "formatter": _format_weblio_html,
+    },
+)
 
 
-async def _fetch_jisho_source(word: str) -> str:
-    url = f"https://jisho.org/api/v1/search/words?keyword={quote(word)}"
-    text = await asyncio.to_thread(_try_fetch_text, url, "jisho")
-    return _format_jisho_payload(text)
+async def _fetch_lookup_source_entry(spec: dict[str, object], word: str) -> dict[str, object]:
+    source_id = str(spec["id"])
+    fetch_url = spec["fetch_url"](word)
+    raw = await asyncio.to_thread(_try_fetch_text, fetch_url, source_id)
+    formatter = spec["formatter"]
+    snippet = formatter(raw) if callable(formatter) else ""
+
+    return {
+        "id": source_id,
+        "name": str(spec["name"]),
+        "pageUrl": spec["page_url"](word),
+        "fetchUrl": fetch_url,
+        "preview": snippet,
+    }
 
 
-async def _fetch_wiktionary_source(word: str) -> str:
-    url = f"https://en.wiktionary.org/w/index.php?title={quote(word)}&action=raw"
-    text = await asyncio.to_thread(_try_fetch_text, url, "wiktionary")
-    return _format_wiktionary_raw(text)
-
-
-async def _fetch_weblio_source(word: str) -> str:
-    url = f"https://www.weblio.jp/content/{quote(word)}"
-    text = await asyncio.to_thread(_try_fetch_text, url, "weblio")
-    return _format_weblio_html(text)
-
-
-async def _lookupdictionary_async(word: str) -> str:
+async def _lookupdictionary_async(word: str) -> dict[str, object]:
     logger.info("lookupdictionary_start word=%s", word)
     tasks = [
-        asyncio.create_task(_fetch_dictionaryapi_source(word)),
-        asyncio.create_task(_fetch_jisho_source(word)),
-        asyncio.create_task(_fetch_wiktionary_source(word)),
-        asyncio.create_task(_fetch_weblio_source(word)),
+        asyncio.create_task(_fetch_lookup_source_entry(spec, word))
+        for spec in LOOKUP_SOURCE_SPECS
     ]
     done, pending = await asyncio.wait(tasks, timeout=LOOKUP_SOURCES_TIMEOUT_SECONDS)
     for task in pending:
@@ -312,24 +354,35 @@ async def _lookupdictionary_async(word: str) -> str:
             results.append(task.result())
         except Exception as exc:
             results.append(exc)
+    sources = []
     snippets = []
     for result in results:
         if isinstance(result, Exception):
             continue
-        if isinstance(result, str) and result.strip():
-            snippets.append(result.strip())
+        if isinstance(result, dict):
+            preview = result.get("preview")
+            has_preview = isinstance(preview, str) and bool(preview.strip())
+            if not has_preview:
+                continue
+            sources.append(result)
+            preview = result.get("preview")
+            if isinstance(preview, str) and preview.strip():
+                snippets.append(preview.strip())
 
     logger.info("lookupdictionary_finish word=%s snippets=%s", word, str(snippets))
-    if not snippets:
-        return ""
-    return "\n\n".join(snippets)[:MAX_TOTAL_CHARS]
+    augmented_content = "\n\n".join(snippets)[:MAX_TOTAL_CHARS] if snippets else ""
+    sources.sort(key=lambda item: str(item.get("id", "")))
+    return {
+        "augmented_content": augmented_content,
+        "sources": sources,
+    }
 
 
 @lru_cache(maxsize=128)
-def lookupdictionary(word: str) -> str:
+def lookupdictionary_bundle(word: str) -> dict[str, object]:
     query = word.strip() if isinstance(word, str) else ""
     if not query:
-        return ""
+        return {"augmented_content": "", "sources": []}
     loop = asyncio.new_event_loop()
     try:
         return loop.run_until_complete(_lookupdictionary_async(query))

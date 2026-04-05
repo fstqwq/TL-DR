@@ -3,10 +3,19 @@ export interface DictionaryEntry {
   timestamp: number;
   query: string;
   data: DictionaryData;
+  lookupSources?: LookupSource[];
   nextReview?: number; // for spaced repetition scheduling (ms epoch)
   interval?: number;   // last interval in ms
   ease?: number;       // ease factor (e.g., 2.5)
   reps?: number;       // successful reps count
+}
+
+export interface LookupSource {
+  id: string;
+  name: string;
+  pageUrl: string;
+  fetchUrl: string;
+  preview: string;
 }
 
 export interface DictionaryData {

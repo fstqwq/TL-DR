@@ -2,6 +2,7 @@ import React from 'react';
 import { Volume2, BookOpen } from 'lucide-react';
 import { DictionaryEntry } from '../types';
 import { playAudio } from '../services/ttsService';
+import { LookupSources } from './LookupSources';
 
 type WordContentProps = {
   entry: DictionaryEntry;
@@ -168,6 +169,12 @@ export const WordContent: React.FC<WordContentProps> = ({
           </div>
           <p className="text-slate-800 italic">"{data.exampleSentence.text}"</p>
           <p className="text-slate-500 text-sm mt-1">{data.exampleSentence.translation}</p>
+        </div>
+      )}
+
+      {entry.lookupSources && entry.lookupSources.length > 0 && (
+        <div className="mt-6 border-t border-slate-100 pt-4">
+          <LookupSources sources={entry.lookupSources} />
         </div>
       )}
     </div>

@@ -39,3 +39,5 @@ env
 test_files/
 .vite/
 apps/web/.vite/
+apps/api/data/*
+!apps/api/data/.gitkeep

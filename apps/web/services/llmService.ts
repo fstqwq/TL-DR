@@ -1,4 +1,4 @@
-import { DictionaryData, LuckySentenceResult, WordContext, AppConfig, AutocompleteResult } from "../types";
+import { DictionaryData, LuckySentenceResult, WordContext, AppConfig, LookupSource } from "../types";
 
 // --- CONFIGURATION ---
 
@@ -11,14 +11,6 @@ export const setRuntimeConfig = (config: AppConfig) => {
 const getApiBaseUrl = () => {
   const RAW_BASE_URL = runtimeConfig.BACKEND_URL || 'http://localhost:5000';
   return RAW_BASE_URL.replace(/\/$/, "");
-};
-
-const getFastModel = () => {
-  const fastModel = runtimeConfig.FAST_MODEL;
-  if (!fastModel || typeof fastModel !== 'string') {
-    throw new Error("FAST_MODEL is not configured in /config.json");
-  }
-  return fastModel;
 };
 
 const toStringValue = (value: unknown, fallback = ""): string =>
@@ -83,24 +75,95 @@ const normalizeDictionaryData = (raw: unknown, query: string): DictionaryData =>
   };
 };
 
-export const lookupWord = async (query: string, preferredLanguage: string = 'auto', model: string): Promise<DictionaryData> => {
-  const timestamp = Date.now();
-  try {
-    const response = await fetch(`${getApiBaseUrl()}/api/lookup`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, preferredLanguage, model, timestamp }),
-    });
+type LookupStreamHandlers = {
+  onProgress?: (stage: string, message: string) => void;
+  onSources?: (sources: LookupSource[]) => void;
+  onError?: (stage: string, message: string) => void;
+};
 
-    if (!response.ok) throw new Error(`Backend Error: ${response.statusText}`);
-    const raw = await response.json();
-    return normalizeDictionaryData(raw, query);
-  } catch (error: any) {
-    if (error?.name !== 'AbortError') {
-      console.error("Backend API Error:", error);
-    }
-    throw error;
+const normalizeLookupSources = (value: unknown): LookupSource[] =>
+  Array.isArray(value)
+    ? value.flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const source = item as Record<string, unknown>;
+        return [{
+          id: toStringValue(source.id),
+          name: toStringValue(source.name),
+          pageUrl: toStringValue(source.pageUrl),
+          fetchUrl: toStringValue(source.fetchUrl),
+          preview: toStringValue(source.preview),
+        }];
+      })
+    : [];
+
+export const lookupWord = async (
+  query: string,
+  preferredLanguage: string = 'auto',
+  model: string,
+  signal?: AbortSignal,
+  handlers: LookupStreamHandlers = {}
+): Promise<DictionaryData> => {
+  const timestamp = Date.now();
+  const response = await fetch(`${getApiBaseUrl()}/api/lookup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, preferredLanguage, model, timestamp }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Backend Error: ${response.statusText}`);
   }
+  if (!response.body) {
+    throw new Error("Lookup stream did not return a body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let lookupResult: DictionaryData | null = null;
+  let streamError: Error | null = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done }).replace(/\r\n/g, "\n");
+
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const rawBlock = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const parsed = parseSseEventBlock(rawBlock);
+      if (parsed) {
+        try {
+          const payload = JSON.parse(parsed.data || "{}") as Record<string, unknown>;
+          if (parsed.event === "progress") {
+            const stage = typeof payload.stage === "string" ? payload.stage : "unknown";
+            const message = typeof payload.message === "string" ? payload.message : "";
+            handlers.onProgress?.(stage, message);
+          } else if (parsed.event === "sources") {
+            handlers.onSources?.(normalizeLookupSources(payload.sources));
+          } else if (parsed.event === "result") {
+            lookupResult = normalizeDictionaryData(payload, query);
+          } else if (parsed.event === "error") {
+            const stage = typeof payload.stage === "string" ? payload.stage : "unknown";
+            const message = typeof payload.message === "string" ? payload.message : "Unknown lookup error";
+            handlers.onError?.(stage, message);
+            streamError = new Error(message);
+          }
+        } catch (error) {
+          console.error("Lookup stream parse error:", error);
+        }
+      }
+      boundary = buffer.indexOf("\n\n");
+    }
+
+    if (done) break;
+  }
+
+  if (lookupResult) return lookupResult;
+  if (streamError) throw streamError;
+  throw new Error("Lookup stream ended without a result.");
 };
 
 export const generateSentence = async (words: WordContext[], model: string): Promise<LuckySentenceResult> => {
@@ -120,27 +183,87 @@ export const generateSentence = async (words: WordContext[], model: string): Pro
   }
 };
 
-export const autocompleteWords = async (
-  partialInput: string,
-  _model: string,
-  preferredLanguage: string = 'auto',
-  signal?: AbortSignal
-): Promise<string[]> => {
-  const timestamp = Date.now();
-  const model = getFastModel();
-  try {
-    const response = await fetch(`${getApiBaseUrl()}/api/autocomplete`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ partialInput, preferredLanguage, model, timestamp }),
-      signal,
-    });
+type AutocompleteStreamHandlers = {
+  onLocal?: (suggestions: string[]) => void;
+  onApi?: (suggestions: string[]) => void;
+  onError?: (stage: string, message: string) => void;
+};
 
-    if (!response.ok) throw new Error(`Backend Error: ${response.statusText}`);
-    const data = await response.json() as AutocompleteResult;
-    return Array.isArray(data.suggestions) ? data.suggestions : [];
-  } catch (error) {
-    console.error("Backend API Error:", error);
-    throw error;
+const parseSseEventBlock = (block: string): { event: string; data: string } | null => {
+  const trimmed = block.trim();
+  if (!trimmed) return null;
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of trimmed.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice("event:".length).trim();
+      continue;
+    }
+    if (line.startsWith("data:")) {
+      dataLines.push(line.slice("data:".length).trimStart());
+    }
+  }
+  return { event, data: dataLines.join("\n") };
+};
+
+const normalizeSuggestions = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+
+export const autocompleteWordsStream = async (
+  partialInput: string,
+  preferredLanguage: string = 'auto',
+  signal?: AbortSignal,
+  handlers: AutocompleteStreamHandlers = {}
+): Promise<void> => {
+  const timestamp = Date.now();
+  const response = await fetch(`${getApiBaseUrl()}/api/autocomplete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ partialInput, preferredLanguage, timestamp }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Backend Error: ${response.statusText}`);
+  }
+  if (!response.body) {
+    throw new Error("Autocomplete stream did not return a body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done }).replace(/\r\n/g, "\n");
+
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      const rawBlock = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const parsed = parseSseEventBlock(rawBlock);
+      if (parsed) {
+        try {
+          const payload = JSON.parse(parsed.data || "{}") as { suggestions?: unknown; stage?: unknown; message?: unknown };
+          if (parsed.event === "local") {
+            handlers.onLocal?.(normalizeSuggestions(payload.suggestions));
+          } else if (parsed.event === "api") {
+            handlers.onApi?.(normalizeSuggestions(payload.suggestions));
+          } else if (parsed.event === "error") {
+            handlers.onError?.(
+              typeof payload.stage === "string" ? payload.stage : "unknown",
+              typeof payload.message === "string" ? payload.message : "Unknown autocomplete error"
+            );
+          }
+        } catch (error) {
+          console.error("Autocomplete stream parse error:", error);
+        }
+      }
+      boundary = buffer.indexOf("\n\n");
+    }
+
+    if (done) break;
   }
 };
