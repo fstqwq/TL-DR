@@ -83,7 +83,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         self.assertEqual(response.get_json(), {"error": "Invalid request."})
 
     def test_lookup_streams_progress_then_result(self):
-        fake_create = MagicMock(return_value=make_chat_response('{"targetWord":"apple"}'))
+        fake_create = AsyncMock(return_value=make_chat_response('{"targetWord":"apple"}'))
         fake_client = make_fake_client(fake_create)
         fake_sources = [
             {
@@ -210,7 +210,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         self.assertNotIn("À", text)
 
     def test_autocomplete_streams_local_then_api(self):
-        fake_create = MagicMock(return_value=make_chat_response("<think>ignored</think>\nfood\nbusiness card\nnoun"))
+        fake_create = AsyncMock(return_value=make_chat_response("<think>ignored</think>\nfood\nbusiness card\nnoun"))
         fake_client = make_fake_client(fake_create)
         fake_local = MagicMock()
         fake_local.search.return_value = ["美食"]

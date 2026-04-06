@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 import cloudscraper
 from bs4 import BeautifulSoup
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 HTTP_TIMEOUT_SECONDS = 1.0
@@ -17,8 +17,8 @@ MAX_SOURCE_CHARS = 1200
 MAX_TOTAL_CHARS = 3200
 
 
-def create_openai_client(api_key: str, base_url: str) -> OpenAI:
-    return OpenAI(api_key=api_key, base_url=base_url)
+def create_openai_client(api_key: str, base_url: str) -> AsyncOpenAI:
+    return AsyncOpenAI(api_key=api_key, base_url=base_url)
 
 
 def heal_json_text(text: str) -> str:

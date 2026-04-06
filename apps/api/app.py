@@ -1,5 +1,7 @@
+import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
@@ -75,6 +77,7 @@ main_limit, autocomplete_limit = attach_global_limiter(
 assert API_KEY, "API_KEY must be set."
 OPENAI_CLIENT = create_openai_client(API_KEY, BASE_URL)
 LOCAL_AUTOCOMPLETE = LocalAutocomplete(AUTOCOMPLETE_INDEX_PATH)
+AUTOCOMPLETE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="autocomplete-api")
 
 
 def _sse_event(name: str, payload: object) -> str:
@@ -103,6 +106,17 @@ def lookup_word():
 
     @stream_with_context
     def generate():
+        async def fetch_lookup_result() -> object:
+            return await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": lookup_system_content()},
+                    {"role": "user", "content": lookup_user_content(query, preferred_language, augmented_content)},
+                ],
+                temperature=0.1,
+                response_format={"type": "json_schema"},
+            )
+
         try:
             yield _sse_event(
                 "progress",
@@ -124,15 +138,7 @@ def lookup_word():
                 "progress",
                 {"stage": "generate", "message": "Generating dictionary entry"},
             )
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": lookup_system_content()},
-                    {"role": "user", "content": lookup_user_content(query, preferred_language, augmented_content)},
-                ],
-                temperature=0.1,
-                response_format={"type": "json_schema"},
-            )
+            response = asyncio.run(fetch_lookup_result())
 
             content = response.choices[0].message.content
             print(f"Raw response content: {content}")
@@ -170,6 +176,24 @@ def autocomplete():
 
     @stream_with_context
     def generate():
+        async def fetch_api_suggestions() -> list[str]:
+            response = await client.chat.completions.create(
+                model=FAST_MODEL,
+                messages=[
+                    {"role": "system", "content": AUTOCOMPLETE_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (f"Language: {preferred_language}\n" if preferred_language != "auto" else "")
+                        + f"Input: {partial_input}",
+                    },
+                ],
+                temperature=0,
+                max_tokens=32,
+            )
+            content = response.choices[0].message.content or ""
+            return parse_autocomplete_suggestions(content)
+
+        api_future = AUTOCOMPLETE_EXECUTOR.submit(lambda: asyncio.run(fetch_api_suggestions()))
         local_suggestions: list[str] = []
         try:
             local_suggestions = LOCAL_AUTOCOMPLETE.search(
@@ -184,21 +208,7 @@ def autocomplete():
 
         api_suggestions: list[str] = []
         try:
-            response = client.chat.completions.create(
-                model=FAST_MODEL,
-                messages=[
-                    {"role": "system", "content": AUTOCOMPLETE_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (f"Language: {preferred_language}\n" if preferred_language != "auto" else "")
-                        + f"Input: {partial_input}",
-                    },
-                ],
-                temperature=0,
-                max_tokens=32,
-            )
-            content = response.choices[0].message.content or ""
-            api_suggestions = parse_autocomplete_suggestions(content)
+            api_suggestions = api_future.result()
         except Exception as exc:
             logging.exception("api_autocomplete_failed query=%s", partial_input)
             yield _sse_event("error", {"stage": "api", "message": str(exc)})
@@ -230,14 +240,17 @@ def generate_sentence():
 
     try:
         client = OPENAI_CLIENT
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": lucky_system_content()},
-                {"role": "user", "content": f"Input Words: {json.dumps(words, ensure_ascii=False, indent=None)}"},
-            ],
-            response_format={"type": "json_schema"},
-        )
+        async def fetch_sentence_result() -> object:
+            return await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": lucky_system_content()},
+                    {"role": "user", "content": f"Input Words: {json.dumps(words, ensure_ascii=False, indent=None)}"},
+                ],
+                response_format={"type": "json_schema"},
+            )
+
+        response = asyncio.run(fetch_sentence_result())
 
         content = response.choices[0].message.content
         print(f"Lucky response: {content}")

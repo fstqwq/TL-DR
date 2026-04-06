@@ -45,6 +45,27 @@ class LocalAutocompleteRankingTestCase(unittest.TestCase):
         self.assertEqual(results[0]["surface"], "测试")
         self.assertEqual(results[1]["surface"], "けし")
 
+    def test_cehsi_matches_ceshi_via_transposition_neighbor(self):
+        index = CompactIndex(
+            aliases=["ceshi"],
+            postings=[
+                [
+                    (0, 0, 450),
+                ],
+            ],
+            surfaces=[
+                ("测试", "zh"),
+            ],
+            sources=[
+                "cc-cedict:pinyin",
+            ],
+            meta={},
+        )
+
+        results = search_compact_index(index, "cehsi", preferred_language="zh", limit=5)
+
+        self.assertEqual(results[0]["surface"], "测试")
+
 
 if __name__ == "__main__":
     unittest.main()

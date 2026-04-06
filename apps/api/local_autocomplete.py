@@ -286,23 +286,44 @@ def query_variants(text: str) -> list[str]:
     return variants
 
 
-def limited_levenshtein(a: str, b: str, max_distance: int) -> int:
-    if abs(len(a) - len(b)) > max_distance:
-        return max_distance + 1
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, start=1):
-        curr = [i]
-        row_min = curr[0]
-        for j, cb in enumerate(b, start=1):
-            cost = 0 if ca == cb else 1
-            value = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
-            curr.append(value)
-            if value < row_min:
-                row_min = value
-        if row_min > max_distance:
-            return max_distance + 1
-        prev = curr
-    return prev[-1]
+LATIN_TYPO_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
+TYPO_VARIANT_LIMIT = 512
+TYPO_ROW_LIMIT = 64
+
+
+def typo_neighbors(text: str, limit: int = TYPO_VARIANT_LIMIT) -> list[tuple[str, float]]:
+    normalized = normalize_query(text)
+    if not normalized or detect_script(normalized) != "latin":
+        return []
+
+    variants: list[tuple[str, float]] = []
+    seen: set[str] = {normalized}
+
+    def add(value: str, penalty: float) -> None:
+        if not value or value in seen or len(variants) >= limit:
+            return
+        seen.add(value)
+        variants.append((value, penalty))
+
+    for i in range(len(normalized) - 1):
+        swapped = list(normalized)
+        swapped[i], swapped[i + 1] = swapped[i + 1], swapped[i]
+        add("".join(swapped), 1.0)
+
+    for i in range(len(normalized)):
+        for ch in LATIN_TYPO_ALPHABET:
+            if ch == normalized[i]:
+                continue
+            add(normalized[:i] + ch + normalized[i + 1 :], 2.0)
+
+    for i in range(len(normalized)):
+        add(normalized[:i] + normalized[i + 1 :], 2.0)
+
+    for i in range(len(normalized) + 1):
+        for ch in LATIN_TYPO_ALPHABET:
+            add(normalized[:i] + ch + normalized[i:], 2.0)
+
+    return variants
 
 
 def allow_row_for_script(row: dict[str, object], script: str) -> bool:
@@ -318,7 +339,7 @@ def allow_row_for_script(row: dict[str, object], script: str) -> bool:
 def rank_candidate(
     row: dict[str, object],
     query_norm: str,
-    distance: int | None,
+    typo_penalty: float = 0.0,
     preferred_language: str = "auto",
 ) -> float:
     score = float(row["score"])
@@ -329,8 +350,7 @@ def rank_candidate(
     if alias_norm.startswith(query_norm):
         score += 20.0
         score -= min(10.0, max(0, len(alias_norm) - len(query_norm)) * 0.9)
-    if distance is not None:
-        score -= distance * 3.0
+    score -= typo_penalty
 
     if preferred_language != "auto" and lang == preferred_language:
         score += 6.0
@@ -385,18 +405,34 @@ def prefix_rows(index: CompactIndex, query_norm: str, limit: int) -> list[dict[s
     end = bisect.bisect_left(index.aliases, upper)
     return _rows_for_alias_range(index, start, end, limit)
 
+def _collect_prefix_matches(
+    index: CompactIndex,
+    query_text: str,
+    preferred_language: str = "auto",
+    limit: int = 50,
+    typo_penalty: float = 0.0,
+) -> dict[tuple[str, str], dict[str, object]]:
+    query_norm = normalize_query(query_text)
+    script = detect_script(query_text)
+    merged: dict[tuple[str, str], dict[str, object]] = {}
 
-def fuzzy_rows(index: CompactIndex, query_norm: str, limit: int) -> list[dict[str, object]]:
-    if not query_norm:
-        return []
-    first = query_norm[:1]
-    upper = first + "\U0010FFFF"
-    start = bisect.bisect_left(index.aliases, first)
-    end = bisect.bisect_left(index.aliases, upper)
-    rows = _rows_for_alias_range(index, start, end, max(limit * 4, limit))
-    min_len = max(1, len(query_norm) - 2)
-    max_len = len(query_norm) + 2
-    return [row for row in rows if min_len <= len(str(row["alias_norm"])) <= max_len][:limit]
+    for row in prefix_rows(index, query_norm, 1000):
+        if not allow_row_for_script(row, script):
+            continue
+        key = (str(row["surface"]), str(row["lang"]))
+        score = rank_candidate(row, query_norm, typo_penalty=typo_penalty, preferred_language=preferred_language)
+        bucket = merged.get(key)
+        if bucket is None or score > float(bucket["score"]):
+            merged[key] = {
+                "surface": row["surface"],
+                "lang": row["lang"],
+                "source": row["source"],
+                "score": score,
+            }
+        if len(merged) >= limit:
+            break
+
+    return merged
 
 
 def search_single_segment(
@@ -405,49 +441,30 @@ def search_single_segment(
     preferred_language: str = "auto",
     limit: int = 3,
 ) -> list[dict[str, object]]:
-    query_norm = normalize_query(query)
-    script = detect_script(query)
     preferred_language = normalize_preferred_language(preferred_language)
-    seen: set[tuple[str, str]] = set()
-    ranked: list[dict[str, object]] = []
 
-    for row in prefix_rows(index, query_norm, 1000):
-        if not allow_row_for_script(row, script):
-            continue
-        key = (str(row["surface"]), str(row["lang"]))
-        if key in seen:
-            continue
-        seen.add(key)
-        ranked.append(
-                {
-                    "surface": row["surface"],
-                    "lang": row["lang"],
-                    "source": row["source"],
-                    "score": rank_candidate(row, query_norm, None, preferred_language),
-                }
+    merged = _collect_prefix_matches(
+        index,
+        query,
+        preferred_language=preferred_language,
+        limit=max(50, limit),
+    )
+
+    if not merged:
+        for neighbor, typo_penalty in typo_neighbors(query):
+            neighbor_matches = _collect_prefix_matches(
+                index,
+                neighbor,
+                preferred_language=preferred_language,
+                limit=TYPO_ROW_LIMIT,
+                typo_penalty=typo_penalty,
             )
+            for key, item in neighbor_matches.items():
+                bucket = merged.get(key)
+                if bucket is None or float(item["score"]) > float(bucket["score"]):
+                    merged[key] = item
 
-    if not ranked:
-        max_distance = 1 if len(query_norm) <= 5 else 2
-        for row in fuzzy_rows(index, query_norm, 5000):
-            if not allow_row_for_script(row, script):
-                continue
-            key = (str(row["surface"]), str(row["lang"]))
-            if key in seen:
-                continue
-            distance = limited_levenshtein(query_norm, str(row["alias_norm"]), max_distance)
-            if distance > max_distance:
-                continue
-            seen.add(key)
-            ranked.append(
-                {
-                    "surface": row["surface"],
-                    "lang": row["lang"],
-                    "source": row["source"],
-                    "score": rank_candidate(row, query_norm, distance, preferred_language),
-                }
-            )
-
+    ranked = list(merged.values())
     ranked.sort(key=lambda item: (-float(item["score"]), str(item["surface"])))
     return ranked[:limit]
 

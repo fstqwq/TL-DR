@@ -36,7 +36,7 @@ const HARD_MIN_INTERVAL = 3 * 60 * 1000; // 3 minutes
 const GOOD_NEW_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const LEARNING_REPEAT_CNT = 2;
 const LEARNING_HARD_CNT = 5;
-const AUTOCOMPLETE_DEBOUNCE_MS = 250;
+const AUTOCOMPLETE_DEBOUNCE_MS = 50;
 const AUTOCOMPLETE_MIN_CHARS = 2;
 const AUTOCOMPLETE_CJK_MIN_CHARS = 2;
 const AUTOCOMPLETE_CACHE_TTL_MS = 90 * 1000;
@@ -928,7 +928,7 @@ function App({ config }: AppProps) {
       label: <Sparkles size={18} />, 
       title: 'Auto Detect',
       baseClass: 'bg-slate-100 text-slate-500 hover:bg-slate-200',
-      activeClass: 'bg-slate-800 text-white shadow-lg scale-110'
+      activeClass: 'bg-indigo-600 text-white shadow-lg scale-110'
     },
     { 
       id: 'zh', 
@@ -953,6 +953,25 @@ function App({ config }: AppProps) {
     },
   ];
 
+  const renderLanguageSelectors = (sizeClass: string, gapClass: string) => (
+    <div className={`flex ${gapClass}`}>
+      {langOptions.map((lang) => (
+        <button
+          key={lang.id}
+          onClick={() => setPreferredLang(lang.id)}
+          type="button"
+          title={lang.title}
+          className={`
+            ${sizeClass} rounded-full flex items-center justify-center font-bold text-sm transition-all duration-300
+            ${preferredLang === lang.id ? lang.activeClass : lang.baseClass}
+          `}
+        >
+          {lang.label}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900 pb-20">
       
@@ -965,7 +984,10 @@ function App({ config }: AppProps) {
             <h1 className="text-xl font-bold tracking-tight text-indigo-600 sm:hidden">TL;DR</h1>
           </div>
           
-          <div className="flex items-center gap-3 relative" ref={settingsRef}>
+          <div className="flex items-center gap-2 sm:gap-3 relative" ref={settingsRef}>
+             <div className="sm:hidden">
+               {renderLanguageSelectors('w-8 h-8 text-xs', 'items-center gap-2')}
+             </div>
              {/* Settings Menu Toggle */}
              <button 
                 onClick={() => setIsSettingsOpen(!isSettingsOpen)}
@@ -1040,27 +1062,14 @@ function App({ config }: AppProps) {
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-8 space-y-10">
+      <main className="max-w-5xl mx-auto px-4 pt-3 pb-8 space-y-10 md:py-8">
         
         {/* Search Section */}
-        <section className="flex flex-col items-center justify-center space-y-6">
+        <section className="flex flex-col items-center space-y-4 pt-2 md:space-y-6 md:pt-0">
           <div className="w-full max-w-xl">
             {/* Language Selectors */}
-            <div className="flex justify-center gap-4 mb-6">
-              {langOptions.map((lang) => (
-                <button
-                  key={lang.id}
-                  onClick={() => setPreferredLang(lang.id)}
-                  type="button"
-                  title={lang.title}
-                  className={`
-                    w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm transition-all duration-300
-                    ${preferredLang === lang.id ? lang.activeClass : lang.baseClass}
-                  `}
-                >
-                  {lang.label}
-                </button>
-              ))}
+            <div className="hidden sm:flex justify-center mb-4 md:mb-6">
+              {renderLanguageSelectors('w-10 h-10', 'items-center gap-4')}
             </div>
 
             <form onSubmit={handleSearch} className="relative group">
