@@ -5,9 +5,7 @@ import json
 import lzma
 import pickle
 import re
-import shutil
 import sys
-import tarfile
 import tempfile
 import unicodedata
 import urllib.request
@@ -24,16 +22,12 @@ if str(SCRIPT_DIR) not in sys.path:
 
 
 CEDICT_RE = re.compile(r"^(?P<trad>\S+)\s+(?P<simp>\S+)\s+\[(?P<pinyin>.+?)\]\s+/(?P<defs>.+)/$")
-SCOWL_FILES = (
-    "scowl-2020.12.07/final/english-words.95",
-    "scowl-2020.12.07/final/american-words.95",
-)
+CMUDICT_ALT_RE = re.compile(r"\(\d+\)$")
 DATA_DIR = API_DIR / "data"
 CEDICT_PATH = DATA_DIR / "cc-cedict.txt.gz"
 JMDICT_PATH = DATA_DIR / "JMdict_e.gz"
-SCOWL_PATH = DATA_DIR / "scowl-2020.12.07.tar.gz"
+CMUDICT_PATH = DATA_DIR / "cmudict.dict"
 OUTPUT_PATH = DATA_DIR / "autocomplete.compact.xz"
-WORDFREQ_TOP_N = 200000
 
 DATASET_DOWNLOADS = {
     "cedict": {
@@ -46,9 +40,9 @@ DATASET_DOWNLOADS = {
         "url": "ftp://ftp.edrdg.org/pub/Nihongo/JMdict_e.gz",
         "encoding": None,
     },
-    "scowl": {
-        "path": SCOWL_PATH,
-        "url": "https://downloads.sourceforge.net/wordlist/scowl-2020.12.07.tar.gz",
+    "cmudict": {
+        "path": CMUDICT_PATH,
+        "url": "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict",
         "encoding": None,
     },
 }
@@ -66,30 +60,30 @@ def build_proxy_opener() -> urllib.request.OpenerDirector:
 
 
 def build_compact_index_from_rows(
-    rows: Iterable[tuple[str, str, str, str, float]],
+    rows: Iterable[tuple[str, str, str, str, str, float]],
     output_path: Path,
     *,
     meta_extra: dict[str, object] | None = None,
 ) -> dict[str, int]:
-    surface_ids: dict[tuple[str, str], int] = {}
+    entry_ids: dict[tuple[str, str, str], int] = {}
     source_ids: dict[str, int] = {}
-    surfaces: list[tuple[str, str]] = []
+    entries: list[tuple[str, str, str]] = []
     sources: list[str] = []
     alias_buckets: dict[str, dict[tuple[int, int], int]] = {}
     row_count = 0
     kept_rows = 0
 
-    for alias_norm, surface, lang, source, score in rows:
+    for alias_norm, surface, reading, lang, source, score in rows:
         if not alias_norm or not surface:
             continue
         row_count += 1
 
-        surface_key = (surface, lang)
-        surface_id = surface_ids.get(surface_key)
-        if surface_id is None:
-            surface_id = len(surfaces)
-            surface_ids[surface_key] = surface_id
-            surfaces.append(surface_key)
+        entry_key = (surface, reading, lang)
+        entry_id = entry_ids.get(entry_key)
+        if entry_id is None:
+            entry_id = len(entries)
+            entry_ids[entry_key] = entry_id
+            entries.append(entry_key)
 
         source_id = source_ids.get(source)
         if source_id is None:
@@ -99,7 +93,7 @@ def build_compact_index_from_rows(
 
         bucket = alias_buckets.setdefault(alias_norm, {})
         score100 = int(round(float(score) * 100))
-        key = (surface_id, source_id)
+        key = (entry_id, source_id)
         prev = bucket.get(key)
         if prev is None or score100 > prev:
             bucket[key] = score100
@@ -112,7 +106,7 @@ def build_compact_index_from_rows(
         "row_count": row_count,
         "deduped_row_count": kept_rows,
         "alias_count": len(alias_buckets),
-        "surface_count": len(surfaces),
+        "entry_count": len(entries),
         "source_count": len(sources),
     }
     if meta_extra:
@@ -127,7 +121,7 @@ def build_compact_index_from_rows(
         "meta": meta,
         "aliases": aliases,
         "postings": postings,
-        "surfaces": surfaces,
+        "entries": entries,
         "sources": sources,
     }
 
@@ -174,13 +168,15 @@ def verify_jmdict(path: Path) -> None:
         raise RuntimeError(f"{path.name} does not look like a valid JMdict file")
 
 
-def verify_scowl(path: Path) -> None:
-    with tarfile.open(path, "r:gz") as archive:
-        try:
-            archive.getmember("scowl-2020.12.07/final/english-words.95")
-            archive.getmember("scowl-2020.12.07/final/american-words.95")
-        except KeyError as exc:
-            raise RuntimeError(f"{path.name} is missing expected SCOWL members") from exc
+def verify_cmudict(path: Path) -> None:
+    with path.open("rt", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped or stripped.startswith(";;;"):
+                continue
+            if re.match(r"^\S+\s+[A-Z]", stripped):
+                return
+    raise RuntimeError(f"{path.name} does not look like a valid CMUdict file")
 
 
 def verify_dataset(kind: str, path: Path) -> None:
@@ -188,8 +184,8 @@ def verify_dataset(kind: str, path: Path) -> None:
         verify_cedict(path)
     elif kind == "jmdict":
         verify_jmdict(path)
-    elif kind == "scowl":
-        verify_scowl(path)
+    elif kind == "cmudict":
+        verify_cmudict(path)
     else:
         raise ValueError(f"Unknown dataset kind: {kind}")
 
@@ -244,13 +240,13 @@ def generate_fuzzy_variants(text: str, rules: list[tuple[str, str]], limit: int 
 
 
 def try_import_wordfreq():
-    from wordfreq import top_n_list, zipf_frequency  # type: ignore
-    return top_n_list, zipf_frequency
+    from wordfreq import zipf_frequency  # type: ignore
+    return zipf_frequency
 
 
 @lru_cache(maxsize=1_000_000)
 def wordfreq_score(word: str, lang: str) -> float:
-    _, zipf_frequency = try_import_wordfreq()
+    zipf_frequency = try_import_wordfreq()
     try:
         score = float(zipf_frequency(word, lang))
     except Exception:
@@ -258,16 +254,149 @@ def wordfreq_score(word: str, lang: str) -> float:
     return max(score, 0.0)
 
 
-def normalize_pinyin(raw: str) -> tuple[str, str]:
+ARPABET_TO_IPA = {
+    "AA": "ɑ",
+    "AE": "æ",
+    "AH": "ʌ",
+    "AO": "ɔ",
+    "AW": "aʊ",
+    "AY": "aɪ",
+    "B": "b",
+    "CH": "tʃ",
+    "D": "d",
+    "DH": "ð",
+    "EH": "ɛ",
+    "ER": "ɝ",
+    "EY": "eɪ",
+    "F": "f",
+    "G": "ɡ",
+    "HH": "h",
+    "IH": "ɪ",
+    "IY": "i",
+    "JH": "dʒ",
+    "K": "k",
+    "L": "l",
+    "M": "m",
+    "N": "n",
+    "NG": "ŋ",
+    "OW": "oʊ",
+    "OY": "ɔɪ",
+    "P": "p",
+    "R": "r",
+    "S": "s",
+    "SH": "ʃ",
+    "T": "t",
+    "TH": "θ",
+    "UH": "ʊ",
+    "UW": "u",
+    "V": "v",
+    "W": "w",
+    "Y": "j",
+    "Z": "z",
+    "ZH": "ʒ",
+}
+ARPABET_VOWELS = {
+    "AA",
+    "AE",
+    "AH",
+    "AO",
+    "AW",
+    "AY",
+    "EH",
+    "ER",
+    "EY",
+    "IH",
+    "IY",
+    "OW",
+    "OY",
+    "UH",
+    "UW",
+}
+
+
+def arpabet_to_ipa(pronunciation: str) -> str:
+    pieces: list[str] = []
+    for token in pronunciation.strip().split():
+        match = re.fullmatch(r"([A-Z]+)([012])?", token)
+        if not match:
+            continue
+        phone, stress = match.groups()
+        ipa = ARPABET_TO_IPA.get(phone)
+        if ipa is None:
+            continue
+        if phone in ARPABET_VOWELS:
+            if stress == "1":
+                ipa = "ˈ" + ipa
+            elif stress == "2":
+                ipa = "ˌ" + ipa
+        pieces.append(ipa)
+    if not pieces:
+        return ""
+    return f"/{''.join(pieces)}/"
+
+
+def normalize_cmudict_word(raw: str) -> str:
+    base = CMUDICT_ALT_RE.sub("", raw.strip())
+    return base.lower()
+
+
+PINYIN_TONE_MARKS = {
+    "a": ("a", "ā", "á", "ǎ", "à"),
+    "e": ("e", "ē", "é", "ě", "è"),
+    "i": ("i", "ī", "í", "ǐ", "ì"),
+    "o": ("o", "ō", "ó", "ǒ", "ò"),
+    "u": ("u", "ū", "ú", "ǔ", "ù"),
+    "ü": ("ü", "ǖ", "ǘ", "ǚ", "ǜ"),
+}
+
+
+def apply_pinyin_tone(base: str, tone: str) -> str:
+    if not base or tone not in {"1", "2", "3", "4"}:
+        return base
+
+    target_index = -1
+    if "a" in base:
+        target_index = base.index("a")
+    elif "e" in base:
+        target_index = base.index("e")
+    elif "ou" in base:
+        target_index = base.index("o")
+    else:
+        for index in range(len(base) - 1, -1, -1):
+            if base[index] in PINYIN_TONE_MARKS:
+                target_index = index
+                break
+
+    if target_index < 0:
+        return base
+
+    vowel = base[target_index]
+    marked = PINYIN_TONE_MARKS[vowel][int(tone)]
+    return f"{base[:target_index]}{marked}{base[target_index + 1 :]}"
+
+
+def normalize_pinyin(raw: str) -> tuple[str, str, str]:
     text = unicodedata.normalize("NFKC", raw).lower()
     text = text.replace("u:", "ü").replace("v", "ü")
-    text = ascii_fold(text)
-    text = re.sub(r"\d", "", text)
-    text = re.sub(r"[^a-zü\s]+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    u_form = text.replace("ü", "u")
-    v_form = text.replace("ü", "v")
-    return u_form, v_form
+    tokens = re.findall(r"[a-zü]+[0-5]?", text)
+
+    display_tokens: list[str] = []
+    alias_tokens: list[str] = []
+    for token in tokens:
+        match = re.fullmatch(r"([a-zü]+)([0-5]?)", token)
+        if not match:
+            continue
+        base, tone = match.groups()
+        if not base:
+            continue
+        display_tokens.append(apply_pinyin_tone(base, tone))
+        alias_tokens.append(base)
+
+    display = " ".join(display_tokens).strip()
+    alias_text = " ".join(alias_tokens).strip()
+    u_form = alias_text.replace("ü", "u")
+    v_form = alias_text.replace("ü", "v")
+    return display, u_form, v_form
 
 
 def pinyin_syllables(text: str) -> list[str]:
@@ -533,7 +662,7 @@ def romaji_variants(text: str) -> set[str]:
     return {item for item in variants if item}
 
 
-def iter_cedict_rows(path: Path) -> Iterable[tuple[str, str, str, str, float]]:
+def iter_cedict_rows(path: Path) -> Iterable[tuple[str, str, str, str, str, float]]:
     with gzip.open(path, "rt", encoding="utf-8") as handle:
         for raw_line in handle:
             line = raw_line.strip()
@@ -544,36 +673,37 @@ def iter_cedict_rows(path: Path) -> Iterable[tuple[str, str, str, str, float]]:
                 continue
             trad = match.group("trad")
             simp = match.group("simp")
-            pinyin_u, pinyin_v = normalize_pinyin(match.group("pinyin"))
+            reading, pinyin_u, pinyin_v = normalize_pinyin(match.group("pinyin"))
             entry_score = max(wordfreq_score(simp, "zh"), wordfreq_score(trad, "zh"))
+            display = simp
 
             for surface in {simp, trad}:
                 yield (
                     normalize_query(surface),
-                    surface,
+                    display,
+                    reading,
                     "zh",
                     "cc-cedict:surface",
                     entry_score,
                 )
 
-            display = simp
             if pinyin_u:
                 normalized = normalize_query(pinyin_u)
-                yield (normalized, display, "zh", "cc-cedict:pinyin", entry_score)
+                yield (normalized, display, reading, "zh", "cc-cedict:pinyin", entry_score)
                 for variant in pinyin_variants(pinyin_u):
                     if variant != normalized:
-                        yield (variant, display, "zh", "cc-cedict:pinyin-fuzzy", entry_score)
+                        yield (variant, display, reading, "zh", "cc-cedict:pinyin-fuzzy", entry_score)
                 for alias in chinese_mixed_aliases(display, pinyin_u):
-                    yield (alias, display, "zh", "cc-cedict:mixed", entry_score)
+                    yield (alias, display, reading, "zh", "cc-cedict:mixed", entry_score)
             if pinyin_v and pinyin_v != pinyin_u:
                 normalized = normalize_query(pinyin_v)
-                yield (normalized, display, "zh", "cc-cedict:pinyin-v", entry_score)
+                yield (normalized, display, reading, "zh", "cc-cedict:pinyin-v", entry_score)
                 for variant in pinyin_variants(pinyin_v):
                     if variant != normalized:
-                        yield (variant, display, "zh", "cc-cedict:pinyin-v-fuzzy", entry_score)
+                        yield (variant, display, reading, "zh", "cc-cedict:pinyin-v-fuzzy", entry_score)
 
 
-def iter_jmdict_rows(path: Path) -> Iterable[tuple[str, str, str, str, float]]:
+def iter_jmdict_rows(path: Path) -> Iterable[tuple[str, str, str, str, str, float]]:
     with gzip.open(path, "rb") as handle:
         context = ET.iterparse(handle, events=("end",))
         for _, elem in context:
@@ -581,16 +711,21 @@ def iter_jmdict_rows(path: Path) -> Iterable[tuple[str, str, str, str, float]]:
                 continue
             kebs = [node.text.strip() for node in elem.findall("./k_ele/keb") if node.text]
             rebs = [node.text.strip() for node in elem.findall("./r_ele/reb") if node.text]
-            entry_score = 0.0
-            for keb in kebs:
-                entry_score = max(entry_score, wordfreq_score(keb, "ja"))
-            for reb in rebs:
-                entry_score = max(entry_score, wordfreq_score(reb, "ja"))
+            display = kebs[0] if kebs else (rebs[0] if rebs else "")
+            reading = rebs[0] if rebs else ""
+            if not display:
+                elem.clear()
+                continue
+            if kebs:
+                entry_score = max(wordfreq_score(keb, "ja") for keb in kebs)
+            else:
+                entry_score = max((wordfreq_score(reb, "ja") for reb in rebs), default=0.0)
 
             for keb in kebs:
                 yield (
                     normalize_query(keb),
-                    keb,
+                    display,
+                    reading,
                     "ja",
                     "jmdict:surface",
                     entry_score,
@@ -599,7 +734,8 @@ def iter_jmdict_rows(path: Path) -> Iterable[tuple[str, str, str, str, float]]:
             for reb in rebs:
                 yield (
                     normalize_query(reb),
-                    reb,
+                    display,
+                    reading,
                     "ja",
                     "jmdict:reading",
                     entry_score,
@@ -608,7 +744,8 @@ def iter_jmdict_rows(path: Path) -> Iterable[tuple[str, str, str, str, float]]:
                 for romaji in romaji_variants(reb):
                     yield (
                         normalize_query(romaji),
-                        reb,
+                        display,
+                        reading,
                         "ja",
                         "jmdict:romaji" if romaji == base_romaji else "jmdict:romaji-fuzzy",
                         entry_score,
@@ -616,81 +753,74 @@ def iter_jmdict_rows(path: Path) -> Iterable[tuple[str, str, str, str, float]]:
             elem.clear()
 
 
-def extract_scowl_file(tar_path: Path, member_name: str) -> list[str]:
-    with tarfile.open(tar_path, "r:gz") as archive:
-        member = archive.getmember(member_name)
-        extracted = archive.extractfile(member)
-        if extracted is None:
+def iter_cmudict_rows(path: Path) -> Iterable[tuple[str, str, str, str, str, float]]:
+    current_word = ""
+    current_readings: list[str] = []
+
+    def flush() -> Iterable[tuple[str, str, str, str, str, float]]:
+        if not current_word or not current_readings:
             return []
-        payload = extracted.read()
-        try:
-            return payload.decode("utf-8").splitlines()
-        except UnicodeDecodeError:
-            return payload.decode("latin-1").splitlines()
-
-
-def iter_scowl_rows(path: Path) -> Iterable[tuple[str, str, str, str, float]]:
-    seen: set[str] = set()
-    for member_name in SCOWL_FILES:
-        for word in extract_scowl_file(path, member_name):
-            item = word.strip()
-            if not item:
-                continue
-            lowered = item.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            yield (normalize_query(lowered), item, "en", "scowl:word", 3.0)
-
-
-def iter_wordfreq_rows(top_n: int) -> Iterable[tuple[str, str, str, str, float]]:
-    top_n_list, zipf_frequency = try_import_wordfreq()
-    allowed = re.compile(r"^[A-Za-z][A-Za-z' -]*[A-Za-z]$|^[A-Za-z]$")
-    seen: set[str] = set()
-    for item in top_n_list("en", top_n):
-        word = item.strip()
-        if not word:
-            continue
-        lowered = word.lower()
-        if lowered in seen or not allowed.match(word):
-            continue
-        seen.add(lowered)
-        yield (
-            normalize_query(lowered),
-            word,
+        reading = " ".join(current_readings)
+        return [(
+            normalize_query(current_word),
+            current_word,
+            reading,
             "en",
-            "wordfreq:word",
-            2.0 + float(zipf_frequency(word, "en")),
-        )
+            "cmudict:word",
+            wordfreq_score(current_word, "en"),
+        )]
+
+    with path.open("rt", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith(";;;"):
+                continue
+            match = re.match(r"^(?P<word>\S+)\s+(?P<pron>.+)$", line)
+            if not match:
+                continue
+            raw_word = match.group("word")
+            pronunciation = match.group("pron")
+            word = normalize_cmudict_word(raw_word)
+            ipa = arpabet_to_ipa(pronunciation)
+            if not word or not ipa:
+                continue
+            if current_word and word != current_word:
+                yield from flush()
+                current_word = word
+                current_readings = [ipa]
+                continue
+            if not current_word:
+                current_word = word
+            if ipa not in current_readings:
+                current_readings.append(ipa)
+        yield from flush()
 
 
 def iter_all_rows(
     cedict_path: Path,
     jmdict_path: Path,
-    scowl_path: Path,
-) -> tuple[Iterable[tuple[str, str, str, str, float]], Counter[str], dict[str, object]]:
+    cmudict_path: Path,
+) -> tuple[Iterable[tuple[str, str, str, str, str, float]], Counter[str], dict[str, object]]:
     counts = Counter()
     meta = {
         "cedict_path": str(cedict_path),
         "jmdict_path": str(jmdict_path),
-        "scowl_path": str(scowl_path),
-        "wordfreq_top_n": WORDFREQ_TOP_N,
+        "cmudict_path": str(cmudict_path),
     }
 
-    def wrapped_rows() -> Iterable[tuple[str, str, str, str, float]]:
+    def wrapped_rows() -> Iterable[tuple[str, str, str, str, str, float]]:
         source_iters = (
             ("cedict", iter_cedict_rows(cedict_path)),
             ("jmdict", iter_jmdict_rows(jmdict_path)),
-            ("scowl", iter_scowl_rows(scowl_path)),
-            ("wordfreq", iter_wordfreq_rows(WORDFREQ_TOP_N)),
+            ("cmudict", iter_cmudict_rows(cmudict_path)),
         )
         for source_name, rows in source_iters:
-            for alias_norm, surface, lang, source, score in rows:
+            for alias_norm, surface, reading, lang, source, score in rows:
                 if not alias_norm or not surface:
                     continue
                 counts[f"{source_name}_rows"] += 1
                 counts[f"{lang}_rows"] += 1
-                yield alias_norm, surface, lang, source, score
+                yield alias_norm, surface, reading, lang, source, score
 
     return wrapped_rows(), counts, meta
 
@@ -699,7 +829,7 @@ def build_artifact(
     output_path: Path = OUTPUT_PATH,
     cedict_path: Path = CEDICT_PATH,
     jmdict_path: Path = JMDICT_PATH,
-    scowl_path: Path = SCOWL_PATH,
+    cmudict_path: Path = CMUDICT_PATH,
 ) -> dict[str, object]:
     print(f"[build] output -> {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -710,7 +840,7 @@ def build_artifact(
     rows, counts, meta = iter_all_rows(
         cedict_path=cedict_path,
         jmdict_path=jmdict_path,
-        scowl_path=scowl_path,
+        cmudict_path=cmudict_path,
     )
     print("[build] compiling compact index")
     compact_meta = build_compact_index_from_rows(rows, output_path, meta_extra={"builder": meta})

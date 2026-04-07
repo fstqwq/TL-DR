@@ -1,4 +1,4 @@
-import { DictionaryData, LuckySentenceResult, WordContext, AppConfig, LookupSource } from "../types";
+import { DictionaryData, LuckySentenceResult, WordContext, AppConfig, LookupSource, LocalAutocompleteSuggestion } from "../types";
 
 // --- CONFIGURATION ---
 
@@ -183,12 +183,6 @@ export const generateSentence = async (words: WordContext[], model: string): Pro
   }
 };
 
-type AutocompleteStreamHandlers = {
-  onLocal?: (suggestions: string[]) => void;
-  onApi?: (suggestions: string[]) => void;
-  onError?: (stage: string, message: string) => void;
-};
-
 const parseSseEventBlock = (block: string): { event: string; data: string } | null => {
   const trimmed = block.trim();
   if (!trimmed) return null;
@@ -209,14 +203,27 @@ const parseSseEventBlock = (block: string): { event: string; data: string } | nu
 const normalizeSuggestions = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 
-export const autocompleteWordsStream = async (
+const normalizeLocalSuggestions = (value: unknown): LocalAutocompleteSuggestion[] =>
+  Array.isArray(value)
+    ? value.flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const suggestion = item as Record<string, unknown>;
+        const surface = toStringValue(suggestion.surface).trim();
+        const reading = toStringValue(suggestion.reading).trim();
+        const lang = suggestion.lang;
+        if (!surface || (lang !== "zh" && lang !== "en" && lang !== "ja")) return [];
+        return [{ surface, reading, lang }];
+      })
+    : [];
+
+const autocompleteRequest = async (
+  path: string,
   partialInput: string,
   preferredLanguage: string = 'auto',
-  signal?: AbortSignal,
-  handlers: AutocompleteStreamHandlers = {}
-): Promise<void> => {
+  signal?: AbortSignal
+): Promise<{ suggestions?: unknown; error?: unknown }> => {
   const timestamp = Date.now();
-  const response = await fetch(`${getApiBaseUrl()}/api/autocomplete`, {
+  const response = await fetch(`${getApiBaseUrl()}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ partialInput, preferredLanguage, timestamp }),
@@ -224,46 +231,36 @@ export const autocompleteWordsStream = async (
   });
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Backend Error: ${response.statusText}`);
-  }
-  if (!response.body) {
-    throw new Error("Autocomplete stream did not return a body.");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value || new Uint8Array(), { stream: !done }).replace(/\r\n/g, "\n");
-
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary >= 0) {
-      const rawBlock = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      const parsed = parseSseEventBlock(rawBlock);
-      if (parsed) {
-        try {
-          const payload = JSON.parse(parsed.data || "{}") as { suggestions?: unknown; stage?: unknown; message?: unknown };
-          if (parsed.event === "local") {
-            handlers.onLocal?.(normalizeSuggestions(payload.suggestions));
-          } else if (parsed.event === "api") {
-            handlers.onApi?.(normalizeSuggestions(payload.suggestions));
-          } else if (parsed.event === "error") {
-            handlers.onError?.(
-              typeof payload.stage === "string" ? payload.stage : "unknown",
-              typeof payload.message === "string" ? payload.message : "Unknown autocomplete error"
-            );
-          }
-        } catch (error) {
-          console.error("Autocomplete stream parse error:", error);
-        }
+    let message = `Backend Error: ${response.statusText}`;
+    try {
+      const payload = await response.json() as { error?: unknown };
+      if (typeof payload.error === "string" && payload.error.trim()) {
+        message = payload.error;
       }
-      boundary = buffer.indexOf("\n\n");
+    } catch {
+      const text = await response.text();
+      if (text) message = text;
     }
-
-    if (done) break;
+    throw new Error(message);
   }
+
+  return await response.json() as { suggestions?: unknown; error?: unknown };
+};
+
+export const autocompleteLocalWords = async (
+  partialInput: string,
+  preferredLanguage: string = 'auto',
+  signal?: AbortSignal
+): Promise<LocalAutocompleteSuggestion[]> => {
+  const payload = await autocompleteRequest('/api/autocomplete/local', partialInput, preferredLanguage, signal);
+  return normalizeLocalSuggestions(payload.suggestions);
+};
+
+export const autocompleteLlmWords = async (
+  partialInput: string,
+  preferredLanguage: string = 'auto',
+  signal?: AbortSignal
+): Promise<string[]> => {
+  const payload = await autocompleteRequest('/api/autocomplete/llm', partialInput, preferredLanguage, signal);
+  return normalizeSuggestions(payload.suggestions);
 };

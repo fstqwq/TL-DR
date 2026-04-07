@@ -1,8 +1,8 @@
 ﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Search, History, Sparkles, Settings2, Dices, X, HelpCircle, CornerDownLeft, Lightbulb } from 'lucide-react';
-import { lookupWord, generateSentence, setRuntimeConfig, autocompleteWordsStream } from './services/llmService';
+import { lookupWord, generateSentence, setRuntimeConfig, autocompleteLocalWords, autocompleteLlmWords } from './services/llmService';
 import { playAudio } from './services/ttsService';
-import { DictionaryEntry, LuckySentenceResult, WordContext, AppConfig, LookupSource } from './types';
+import { DictionaryEntry, LuckySentenceResult, WordContext, AppConfig, LookupSource, LocalAutocompleteSuggestion } from './types';
 import { WordCard } from './components/WordCard';
 import { Spinner } from './components/Spinner';
 import { LuckyResultCard } from './components/LuckyResultCard';
@@ -12,7 +12,7 @@ import { LookupSources } from './components/LookupSources';
 type PreferredLanguage = 'auto' | 'zh' | 'en' | 'ja';
 type AppProps = { config: AppConfig };
 type AutocompleteCacheEntry = {
-  localSuggestions: string[];
+  localSuggestions: LocalAutocompleteSuggestion[];
   apiSuggestions: string[];
   timestamp: number;
   query: string;
@@ -25,6 +25,8 @@ type AutocompleteInFlightEntry = {
 };
 type AutocompleteSuggestionItem = {
   text: string;
+  reading?: string;
+  lang?: 'zh' | 'en' | 'ja';
   source: 'local' | 'api';
 };
 
@@ -36,7 +38,8 @@ const HARD_MIN_INTERVAL = 3 * 60 * 1000; // 3 minutes
 const GOOD_NEW_INTERVAL = 30 * 60 * 1000; // 30 minutes
 const LEARNING_REPEAT_CNT = 2;
 const LEARNING_HARD_CNT = 5;
-const AUTOCOMPLETE_DEBOUNCE_MS = 50;
+const AUTOCOMPLETE_LOCAL_DEBOUNCE_MS = 20;
+const AUTOCOMPLETE_API_DEBOUNCE_MS = 350;
 const AUTOCOMPLETE_MIN_CHARS = 2;
 const AUTOCOMPLETE_CJK_MIN_CHARS = 2;
 const AUTOCOMPLETE_CACHE_TTL_MS = 90 * 1000;
@@ -78,16 +81,21 @@ const buildAutocompleteRequestKey = (query: string, language: PreferredLanguage)
   `${language}:${normalizeAutocompleteValue(query)}`;
 
 const buildAutocompleteSuggestionItems = (
-  localSuggestions: string[],
+  localSuggestions: LocalAutocompleteSuggestion[],
   apiSuggestions: string[]
 ): AutocompleteSuggestionItem[] => {
   const merged: AutocompleteSuggestionItem[] = [];
   const seen = new Set<string>();
   for (const suggestion of localSuggestions) {
-    const key = normalizeAutocompleteValue(suggestion);
+    const key = normalizeAutocompleteValue(suggestion.surface);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    merged.push({ text: suggestion, source: 'local' });
+    merged.push({
+      text: suggestion.surface,
+      reading: suggestion.reading || undefined,
+      lang: suggestion.lang,
+      source: 'local',
+    });
   }
   for (const suggestion of apiSuggestions) {
     const key = normalizeAutocompleteValue(suggestion);
@@ -113,8 +121,8 @@ const getCachedAutocompleteSuggestions = (
   const normalizedQuery = normalizeAutocompleteValue(query);
   if (!normalizedQuery) return null;
   const now = Date.now();
-  let exact: { localSuggestions: string[]; apiSuggestions: string[]; timestamp: number; sourceQuery: string } | null = null;
-  let best: { localSuggestions: string[]; apiSuggestions: string[]; score: number; timestamp: number; sourceQuery: string } | null = null;
+  let exact: { localSuggestions: LocalAutocompleteSuggestion[]; apiSuggestions: string[]; timestamp: number; sourceQuery: string } | null = null;
+  let best: { localSuggestions: LocalAutocompleteSuggestion[]; apiSuggestions: string[]; score: number; timestamp: number; sourceQuery: string } | null = null;
 
   for (const entry of cache.values()) {
     if (now - entry.timestamp >= AUTOCOMPLETE_CACHE_TTL_MS) continue;
@@ -189,15 +197,50 @@ function App({ config }: AppProps) {
   const [isAutocompleteLoading, setIsAutocompleteLoading] = useState(false);
   const [isAutocompleteOpen, setIsAutocompleteOpen] = useState(false);
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(-1);
-  const autocompleteTimerRef = useRef<number | null>(null);
+  const autocompleteLocalTimerRef = useRef<number | null>(null);
+  const autocompleteApiTimerRef = useRef<number | null>(null);
   const suppressAutocompleteRef = useRef(false);
   const autocompleteCacheRef = useRef<Map<string, AutocompleteCacheEntry>>(new Map());
-  const autocompleteInFlightRef = useRef<Map<string, AutocompleteInFlightEntry>>(new Map());
+  const autocompleteLocalInFlightRef = useRef<Map<string, AutocompleteInFlightEntry>>(new Map());
+  const autocompleteApiInFlightRef = useRef<Map<string, AutocompleteInFlightEntry>>(new Map());
   const autocompleteSuggestionsRef = useRef<AutocompleteSuggestionItem[]>([]);
   const autocompleteSourceQueryRef = useRef<string | null>(null);
   const latestQueryRef = useRef('');
   const latestPreferredLangRef = useRef<PreferredLanguage>('auto');
   const lookupAbortRef = useRef<AbortController | null>(null);
+
+  const clearAutocompleteTimers = useCallback(() => {
+    if (autocompleteLocalTimerRef.current) {
+      window.clearTimeout(autocompleteLocalTimerRef.current);
+      autocompleteLocalTimerRef.current = null;
+    }
+    if (autocompleteApiTimerRef.current) {
+      window.clearTimeout(autocompleteApiTimerRef.current);
+      autocompleteApiTimerRef.current = null;
+    }
+  }, []);
+
+  const syncAutocompleteLoading = useCallback(() => {
+    setIsAutocompleteLoading(
+      autocompleteLocalInFlightRef.current.size > 0 || autocompleteApiInFlightRef.current.size > 0
+    );
+  }, []);
+
+  const abortAutocompleteRequests = useCallback(() => {
+    if (autocompleteLocalInFlightRef.current.size === 0 && autocompleteApiInFlightRef.current.size === 0) {
+      syncAutocompleteLoading();
+      return;
+    }
+    for (const request of autocompleteLocalInFlightRef.current.values()) {
+      request.controller.abort();
+    }
+    for (const request of autocompleteApiInFlightRef.current.values()) {
+      request.controller.abort();
+    }
+    autocompleteLocalInFlightRef.current.clear();
+    autocompleteApiInFlightRef.current.clear();
+    syncAutocompleteLoading();
+  }, [syncAutocompleteLoading]);
   
   // Initialize models from local storage, but validate against the current CONFIG
   // If the stored model ID no longer exists in config, fall back to the first available model.
@@ -351,9 +394,11 @@ function App({ config }: AppProps) {
       if (feedbackTimerRef.current) {
         window.clearTimeout(feedbackTimerRef.current);
       }
+      clearAutocompleteTimers();
+      abortAutocompleteRequests();
       lookupAbortRef.current?.abort();
     };
-  }, []);
+  }, [abortAutocompleteRequests, clearAutocompleteTimers]);
 
   // Click outside to close settings
   useEffect(() => {
@@ -380,14 +425,6 @@ function App({ config }: AppProps) {
     latestPreferredLangRef.current = preferredLang;
   }, [preferredLang]);
 
-  const abortAutocompleteRequests = useCallback(() => {
-    if (autocompleteInFlightRef.current.size === 0) return;
-    for (const request of autocompleteInFlightRef.current.values()) {
-      request.controller.abort();
-    }
-    autocompleteInFlightRef.current.clear();
-  }, []);
-
   const handleSearch = useCallback(async (e?: React.FormEvent, overrideQuery?: string) => {
     if (e) e.preventDefault();
     const normalizedQuery = (overrideQuery ?? query).trim();
@@ -403,6 +440,7 @@ function App({ config }: AppProps) {
     }
     setAutocompleteSuggestions([]);
     setActiveSuggestionIndex(-1);
+    clearAutocompleteTimers();
     abortAutocompleteRequests();
     autocompleteSourceQueryRef.current = null;
     lookupAbortRef.current?.abort();
@@ -467,25 +505,21 @@ function App({ config }: AppProps) {
       setIsLoading(false);
       setLookupProgressMessage(null);
     }
-  }, [query, preferredLang, searchModel, abortAutocompleteRequests]);
+  }, [query, preferredLang, searchModel, abortAutocompleteRequests, clearAutocompleteTimers]);
 
   useEffect(() => {
-    if (autocompleteTimerRef.current) {
-      window.clearTimeout(autocompleteTimerRef.current);
-    }
+    clearAutocompleteTimers();
     abortAutocompleteRequests();
     setAutocompleteSuggestions([]);
     setActiveSuggestionIndex(-1);
     autocompleteSourceQueryRef.current = null;
     setIsAutocompleteLoading(false);
-  }, [preferredLang, abortAutocompleteRequests]);
+  }, [preferredLang, abortAutocompleteRequests, clearAutocompleteTimers]);
 
   useEffect(() => {
     if (suppressAutocompleteRef.current) {
       suppressAutocompleteRef.current = false;
-      if (autocompleteTimerRef.current) {
-        window.clearTimeout(autocompleteTimerRef.current);
-      }
+      clearAutocompleteTimers();
       abortAutocompleteRequests();
       setIsAutocompleteLoading(false);
       return;
@@ -495,9 +529,7 @@ function App({ config }: AppProps) {
     const minChars = getAutocompleteMinChars(trimmed);
 
     if (trimmed.length < minChars) {
-      if (autocompleteTimerRef.current) {
-        window.clearTimeout(autocompleteTimerRef.current);
-      }
+      clearAutocompleteTimers();
       abortAutocompleteRequests();
       setAutocompleteSuggestions([]);
       setActiveSuggestionIndex(-1);
@@ -506,15 +538,15 @@ function App({ config }: AppProps) {
       return;
     }
 
-    for (const [requestKey, request] of autocompleteInFlightRef.current.entries()) {
-      if (request.language !== preferredLang || !areAutocompleteQueriesConsistent(request.query, trimmed)) {
-        request.controller.abort();
-        autocompleteInFlightRef.current.delete(requestKey);
+    for (const inFlightRequests of [autocompleteLocalInFlightRef.current, autocompleteApiInFlightRef.current]) {
+      for (const [requestKey, request] of inFlightRequests.entries()) {
+        if (request.language !== preferredLang || !areAutocompleteQueriesConsistent(request.query, trimmed)) {
+          request.controller.abort();
+          inFlightRequests.delete(requestKey);
+        }
       }
     }
-    if (autocompleteInFlightRef.current.size === 0) {
-      setIsAutocompleteLoading(false);
-    }
+    syncAutocompleteLoading();
 
     const cached = getCachedAutocompleteSuggestions(autocompleteCacheRef.current, trimmed, preferredLang);
     const isExactCached =
@@ -525,84 +557,92 @@ function App({ config }: AppProps) {
         buildAutocompleteSuggestionItems(cached.localSuggestions, cached.apiSuggestions)
       );
       setActiveSuggestionIndex(-1);
-      setIsAutocompleteLoading(autocompleteInFlightRef.current.size > 0);
-      return;
+      syncAutocompleteLoading();
+      if (isExactCached && cached.apiSuggestions.length > 0) {
+        return;
+      }
     }
 
-    if (autocompleteTimerRef.current) {
-      window.clearTimeout(autocompleteTimerRef.current);
-    }
+    clearAutocompleteTimers();
 
-    autocompleteTimerRef.current = window.setTimeout(async () => {
-      const requestKey = buildAutocompleteRequestKey(trimmed, preferredLang);
-      if (autocompleteInFlightRef.current.has(requestKey)) return;
-      const controller = new AbortController();
-      autocompleteInFlightRef.current.set(requestKey, { controller, query: trimmed, language: preferredLang });
-      setIsAutocompleteLoading(true);
-
-      const applyAutocompleteStage = (
-        stage: 'localSuggestions' | 'apiSuggestions',
-        stageSuggestions: string[]
-      ) => {
-        const previousEntry = autocompleteCacheRef.current.get(requestKey);
-        const nextEntry: AutocompleteCacheEntry = {
-          localSuggestions: previousEntry?.localSuggestions ?? [],
-          apiSuggestions: previousEntry?.apiSuggestions ?? [],
-          timestamp: Date.now(),
-          query: trimmed,
-          language: preferredLang,
-        };
-        nextEntry[stage] = stageSuggestions;
-        autocompleteCacheRef.current.set(requestKey, nextEntry);
-
-        const currentQuery = latestQueryRef.current.trim();
-        const currentPreferredLang = latestPreferredLangRef.current;
-        if (currentPreferredLang !== preferredLang) return;
-        const currentMinChars = getAutocompleteMinChars(currentQuery);
-        if (currentQuery.length < currentMinChars) return;
-        if (!areAutocompleteQueriesConsistent(trimmed, currentQuery)) return;
-
-        const existingScore = getAutocompleteScore(autocompleteSourceQueryRef.current, currentQuery);
-        const incomingScore = getAutocompleteScore(trimmed, currentQuery);
-        if (incomingScore < existingScore) return;
-
-        const mergedSuggestions = buildAutocompleteSuggestionItems(
-          nextEntry.localSuggestions,
-          nextEntry.apiSuggestions
-        );
-        autocompleteSourceQueryRef.current = trimmed;
-        setAutocompleteSuggestions(mergedSuggestions);
-        setActiveSuggestionIndex(-1);
+    const requestKey = buildAutocompleteRequestKey(trimmed, preferredLang);
+    const applyAutocompleteStage = (
+      stage: 'localSuggestions' | 'apiSuggestions',
+      stageSuggestions: LocalAutocompleteSuggestion[] | string[]
+    ) => {
+      const previousEntry = autocompleteCacheRef.current.get(requestKey);
+      const nextEntry: AutocompleteCacheEntry = {
+        localSuggestions: previousEntry?.localSuggestions ?? [],
+        apiSuggestions: previousEntry?.apiSuggestions ?? [],
+        timestamp: Date.now(),
+        query: trimmed,
+        language: preferredLang,
       };
+      if (stage === 'localSuggestions') {
+        nextEntry.localSuggestions = stageSuggestions as LocalAutocompleteSuggestion[];
+      } else {
+        nextEntry.apiSuggestions = stageSuggestions as string[];
+      }
+      autocompleteCacheRef.current.set(requestKey, nextEntry);
+
+      const currentQuery = latestQueryRef.current.trim();
+      const currentPreferredLang = latestPreferredLangRef.current;
+      if (currentPreferredLang !== preferredLang) return;
+      const currentMinChars = getAutocompleteMinChars(currentQuery);
+      if (currentQuery.length < currentMinChars) return;
+      if (!areAutocompleteQueriesConsistent(trimmed, currentQuery)) return;
+
+      const existingScore = getAutocompleteScore(autocompleteSourceQueryRef.current, currentQuery);
+      const incomingScore = getAutocompleteScore(trimmed, currentQuery);
+      if (incomingScore < existingScore) return;
+
+      const mergedSuggestions = buildAutocompleteSuggestionItems(
+        nextEntry.localSuggestions,
+        nextEntry.apiSuggestions
+      );
+      autocompleteSourceQueryRef.current = trimmed;
+      setAutocompleteSuggestions(mergedSuggestions);
+      setActiveSuggestionIndex(-1);
+    };
+
+    const runAutocompleteRequest = async (
+      stage: 'local' | 'api',
+      inFlightRequests: Map<string, AutocompleteInFlightEntry>,
+    ) => {
+      if (inFlightRequests.has(requestKey)) return;
+      const controller = new AbortController();
+      inFlightRequests.set(requestKey, { controller, query: trimmed, language: preferredLang });
+      syncAutocompleteLoading();
 
       try {
-        await autocompleteWordsStream(trimmed, preferredLang, controller.signal, {
-            onLocal: (suggestions) => {
-              applyAutocompleteStage('localSuggestions', suggestions);
-            },
-          onApi: (suggestions) => {
-            applyAutocompleteStage('apiSuggestions', suggestions);
-          },
-          onError: (_stage, message) => {
-            console.warn('Autocomplete stream error:', message);
-          },
-        });
+        if (stage === 'local') {
+          const suggestions = await autocompleteLocalWords(trimmed, preferredLang, controller.signal);
+          applyAutocompleteStage('localSuggestions', suggestions);
+        } else {
+          const suggestions = await autocompleteLlmWords(trimmed, preferredLang, controller.signal);
+          applyAutocompleteStage('apiSuggestions', suggestions);
+        }
       } catch (err: any) {
         if (err?.name === 'AbortError') return;
+        console.warn(`Autocomplete ${stage} request error:`, err?.message || err);
       } finally {
-        autocompleteInFlightRef.current.delete(requestKey);
-        if (autocompleteInFlightRef.current.size === 0) {
-          setIsAutocompleteLoading(false);
-        }
-      }
-    }, AUTOCOMPLETE_DEBOUNCE_MS);
-
-    return () => {
-      if (autocompleteTimerRef.current) {
-        window.clearTimeout(autocompleteTimerRef.current);
+        inFlightRequests.delete(requestKey);
+        syncAutocompleteLoading();
       }
     };
-  }, [query, searchModel, preferredLang, abortAutocompleteRequests]);
+
+    autocompleteLocalTimerRef.current = window.setTimeout(() => {
+      void runAutocompleteRequest('local', autocompleteLocalInFlightRef.current);
+    }, AUTOCOMPLETE_LOCAL_DEBOUNCE_MS);
+
+    autocompleteApiTimerRef.current = window.setTimeout(() => {
+      void runAutocompleteRequest('api', autocompleteApiInFlightRef.current);
+    }, AUTOCOMPLETE_API_DEBOUNCE_MS);
+
+    return () => {
+      clearAutocompleteTimers();
+    };
+  }, [query, searchModel, preferredLang, abortAutocompleteRequests, clearAutocompleteTimers, syncAutocompleteLoading]);
 
   const applySuggestion = useCallback((suggestion: string) => {
     handleSearch(undefined, suggestion);
@@ -1121,21 +1161,30 @@ function App({ config }: AppProps) {
                       }`}
                     >
                       <div className="flex items-center justify-between gap-3">
-                        <span>
-                          {buildAutocompleteSegments(suggestion.text, trimmedQuery).map((segment, segmentIndex) => (
-                            <span
-                              key={`${suggestion.text}-${segmentIndex}`}
-                              className={segment.isMatch ? 'font-semibold' : ''}
-                            >
-                              {segment.text}
-                            </span>
-                          ))}
-                        </span>
-                        {suggestion.source === 'api' && (
-                          <span className="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700">
-                            LLM
+                        <span className="min-w-0 flex-1 truncate">
+                          <span className="block truncate">
+                            {buildAutocompleteSegments(suggestion.text, trimmedQuery).map((segment, segmentIndex) => (
+                              <span
+                                key={`${suggestion.text}-${segmentIndex}`}
+                                className={segment.isMatch ? 'font-semibold' : ''}
+                              >
+                                {segment.text}
+                              </span>
+                            ))}
                           </span>
-                        )}
+                        </span>
+                        <span className="flex shrink-0 items-center gap-2">
+                          {suggestion.reading && (
+                            <span className="max-w-[11rem] truncate text-xs text-slate-400 sm:max-w-[14rem]">
+                              {suggestion.reading}
+                            </span>
+                          )}
+                          {suggestion.source === 'api' && (
+                            <span className="shrink-0 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700">
+                              LLM
+                            </span>
+                          )}
+                        </span>
                       </div>
                     </button>
                   ))}

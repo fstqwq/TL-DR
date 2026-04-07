@@ -23,15 +23,15 @@ class LocalAutocompleteRankingTestCase(unittest.TestCase):
             postings=[
                 [
                     (0, 0, 450),  # 测试 via pinyin
-                    (1, 1, 870),  # けし via fuzzy romaji alias
+                    (1, 1, 430),  # 消し via fuzzy romaji alias
                 ],
                 [
-                    (1, 1, 870),  # same Japanese candidate via generated query variant
+                    (1, 1, 430),
                 ],
             ],
-            surfaces=[
-                ("测试", "zh"),
-                ("けし", "ja"),
+            entries=[
+                ("测试", "cè shì", "zh"),
+                ("消し", "けし", "ja"),
             ],
             sources=[
                 "cc-cedict:pinyin",
@@ -43,7 +43,9 @@ class LocalAutocompleteRankingTestCase(unittest.TestCase):
         results = search_compact_index(index, "ceshi", preferred_language="zh", limit=5)
 
         self.assertEqual(results[0]["surface"], "测试")
-        self.assertEqual(results[1]["surface"], "けし")
+        self.assertEqual(results[0]["reading"], "cè shì")
+        self.assertEqual(results[1]["surface"], "消し")
+        self.assertEqual(results[1]["reading"], "けし")
 
     def test_cehsi_matches_ceshi_via_transposition_neighbor(self):
         index = CompactIndex(
@@ -53,8 +55,8 @@ class LocalAutocompleteRankingTestCase(unittest.TestCase):
                     (0, 0, 450),
                 ],
             ],
-            surfaces=[
-                ("测试", "zh"),
+            entries=[
+                ("测试", "cè shì", "zh"),
             ],
             sources=[
                 "cc-cedict:pinyin",
@@ -65,6 +67,7 @@ class LocalAutocompleteRankingTestCase(unittest.TestCase):
         results = search_compact_index(index, "cehsi", preferred_language="zh", limit=5)
 
         self.assertEqual(results[0]["surface"], "测试")
+        self.assertEqual(results[0]["reading"], "cè shì")
 
 
 if __name__ == "__main__":

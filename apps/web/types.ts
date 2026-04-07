@@ -59,6 +59,12 @@ export interface AutocompleteResult {
   suggestions: string[];
 }
 
+export interface LocalAutocompleteSuggestion {
+  surface: string;
+  reading: string;
+  lang: 'zh' | 'en' | 'ja';
+}
+
 export interface AppConfig {
   BACKEND_URL?: string;
   MODELS?: Array<{ id: string; name: string }>;

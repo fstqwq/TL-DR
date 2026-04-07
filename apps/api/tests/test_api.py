@@ -1,9 +1,9 @@
-import os
+import asyncio
 import json
+import os
 import sys
 import time
 import unittest
-import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -128,6 +128,33 @@ class ApiEndpointsTestCase(unittest.TestCase):
         )
         self.assertEqual(fake_create.call_count, 1)
 
+    def test_lookup_handles_unicode_llm_content_without_console_encoding_failure(self):
+        fake_create = AsyncMock(return_value=make_chat_response('{"targetWord":"オーケストラ・アレンジャー"}'))
+        fake_client = make_fake_client(fake_create)
+
+        with (
+            patch.object(api_app, "OPENAI_CLIENT", fake_client),
+            patch.object(
+                api_app,
+                "lookupdictionary_bundle",
+                return_value={"augmented_content": "", "sources": []},
+            ),
+        ):
+            response = self.client.post(
+                "/api/lookup",
+                json={
+                    "query": "orchestrator",
+                    "preferredLanguage": "en",
+                    "model": self.model_id,
+                    "timestamp": int(time.time() * 1000),
+                },
+                buffered=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        events = parse_sse_events(response.get_data(as_text=True))
+        self.assertEqual(events[-1], ("result", {"targetWord": "オーケストラ・アレンジャー"}))
+
     def test_lookup_helper_filters_failed_sources(self):
         fake_specs = (
             {"id": "ok", "name": "Ok"},
@@ -209,42 +236,51 @@ class ApiEndpointsTestCase(unittest.TestCase):
         self.assertIn("/ˈpɹiːvɪəs/", text)
         self.assertNotIn("À", text)
 
-    def test_autocomplete_streams_local_then_api(self):
-        fake_create = AsyncMock(return_value=make_chat_response("<think>ignored</think>\nfood\nbusiness card\nnoun"))
-        fake_client = make_fake_client(fake_create)
+    def test_autocomplete_local_returns_json(self):
         fake_local = MagicMock()
-        fake_local.search.return_value = ["美食"]
+        fake_local.search.return_value = [{"surface": "美食", "reading": "měi shí", "lang": "zh"}]
 
-        with (
-            patch.object(api_app, "OPENAI_CLIENT", fake_client),
-            patch.object(api_app, "LOCAL_AUTOCOMPLETE", fake_local),
-        ):
+        with patch.object(api_app, "LOCAL_AUTOCOMPLETE", fake_local):
             response = self.client.post(
-                "/api/autocomplete",
+                "/api/autocomplete/local",
                 json={
                     "partialInput": "meishi",
                     "preferredLanguage": "zh",
                     "timestamp": int(time.time() * 1000),
                 },
-                buffered=True,
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.mimetype, "text/event-stream")
-        events = parse_sse_events(response.get_data(as_text=True))
         self.assertEqual(
-            events,
-            [
-                ("local", {"suggestions": ["美食"]}),
-                ("api", {"suggestions": ["food", "business card", "noun"]}),
-            ],
+            response.get_json(),
+            {"suggestions": [{"surface": "美食", "reading": "měi shí", "lang": "zh"}]},
+        )
+        fake_local.search.assert_called_once_with("meishi", preferred_language="zh", limit=3)
+
+    def test_autocomplete_llm_returns_json(self):
+        fake_create = AsyncMock(return_value=make_chat_response("<think>ignored</think>\nfood\nbusiness card\nnoun"))
+        fake_client = make_fake_client(fake_create)
+
+        with patch.object(api_app, "OPENAI_CLIENT", fake_client):
+            response = self.client.post(
+                "/api/autocomplete/llm",
+                json={
+                    "partialInput": "meishi",
+                    "preferredLanguage": "zh",
+                    "timestamp": int(time.time() * 1000),
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json(),
+            {"suggestions": ["food", "business card", "noun"]},
         )
 
         _, kwargs = fake_create.call_args
         self.assertIn("messages", kwargs)
         self.assertIn("Language: zh", kwargs["messages"][1]["content"])
         self.assertIn("Input: meishi", kwargs["messages"][1]["content"])
-        fake_local.search.assert_called_once_with("meishi", preferred_language="zh", limit=3)
 
     def test_generate_sentence_requires_two_words(self):
         response = self.client.post(

@@ -362,7 +362,7 @@ def rank_candidate(
 class CompactIndex:
     aliases: list[str]
     postings: list[list[tuple[int, int, int]]]
-    surfaces: list[tuple[str, str]]
+    entries: list[tuple[str, str, str]]
     sources: list[str]
     meta: dict[str, object]
 
@@ -373,7 +373,7 @@ def load_compact_index(path: Path) -> CompactIndex:
     return CompactIndex(
         aliases=payload["aliases"],
         postings=payload["postings"],
-        surfaces=payload["surfaces"],
+        entries=payload["entries"],
         sources=payload["sources"],
         meta=payload["meta"],
     )
@@ -383,12 +383,14 @@ def _rows_for_alias_range(index: CompactIndex, start: int, end: int, limit: int)
     rows: list[dict[str, object]] = []
     for pos in range(start, end):
         alias_norm = index.aliases[pos]
-        for surface_id, source_id, score100 in index.postings[pos]:
-            surface, lang = index.surfaces[surface_id]
+        for entry_id, source_id, score100 in index.postings[pos]:
+            surface, reading, lang = index.entries[entry_id]
             rows.append(
                 {
+                    "entry_id": entry_id,
                     "alias_norm": alias_norm,
                     "surface": surface,
+                    "reading": reading,
                     "lang": lang,
                     "source": index.sources[source_id],
                     "score": score100 / 100.0,
@@ -411,20 +413,22 @@ def _collect_prefix_matches(
     preferred_language: str = "auto",
     limit: int = 50,
     typo_penalty: float = 0.0,
-) -> dict[tuple[str, str], dict[str, object]]:
+) -> dict[int, dict[str, object]]:
     query_norm = normalize_query(query_text)
     script = detect_script(query_text)
-    merged: dict[tuple[str, str], dict[str, object]] = {}
+    merged: dict[int, dict[str, object]] = {}
 
     for row in prefix_rows(index, query_norm, 1000):
         if not allow_row_for_script(row, script):
             continue
-        key = (str(row["surface"]), str(row["lang"]))
+        key = int(row["entry_id"])
         score = rank_candidate(row, query_norm, typo_penalty=typo_penalty, preferred_language=preferred_language)
         bucket = merged.get(key)
         if bucket is None or score > float(bucket["score"]):
             merged[key] = {
+                "entry_id": key,
                 "surface": row["surface"],
+                "reading": row["reading"],
                 "lang": row["lang"],
                 "source": row["source"],
                 "score": score,
@@ -479,7 +483,7 @@ def search_compact_index(
     variants = query_variants(query)
     segments = split_query_segments(query)
     if len(variants) > 1 or len(segments) > 1:
-        merged: dict[tuple[str, str], dict[str, object]] = {}
+        merged: dict[int, dict[str, object]] = {}
         search_inputs = [query]
         search_inputs.extend(variant for variant in variants[1:] if variant != query)
         if len(segments) > 1:
@@ -487,11 +491,13 @@ def search_compact_index(
 
         for search_input in search_inputs:
             for item in search_single_segment(index, search_input, preferred_language=preferred_language, limit=50):
-                key = (str(item["surface"]), str(item["lang"]))
+                key = int(item["entry_id"])
                 bucket = merged.get(key)
                 if bucket is None:
                     merged[key] = {
+                        "entry_id": key,
                         "surface": item["surface"],
+                        "reading": item["reading"],
                         "lang": item["lang"],
                         "source": item["source"],
                         "score": float(item["score"]),
@@ -513,7 +519,7 @@ class LocalAutocomplete:
         self._index: CompactIndex | None = None
         self._load_attempted = False
 
-    def search(self, query: str, preferred_language: str = "auto", limit: int = 3) -> list[str]:
+    def search(self, query: str, preferred_language: str = "auto", limit: int = 3) -> list[dict[str, str]]:
         normalized_query = query.strip() if isinstance(query, str) else ""
         if not normalized_query:
             return []
@@ -526,7 +532,14 @@ class LocalAutocomplete:
             preferred_language=preferred_language,
             limit=max(1, min(limit, 10)),
         )
-        return [str(item["surface"]) for item in results[:limit]]
+        return [
+            {
+                "surface": str(item["surface"]),
+                "reading": str(item.get("reading", "")),
+                "lang": str(item["lang"]),
+            }
+            for item in results[:limit]
+        ]
 
     def _ensure_index(self) -> CompactIndex | None:
         if self._index is not None:
@@ -545,10 +558,10 @@ class LocalAutocomplete:
             try:
                 self._index = load_compact_index(self.index_path)
                 logger.info(
-                    "local_autocomplete_index_loaded path=%s aliases=%s surfaces=%s",
+                    "local_autocomplete_index_loaded path=%s aliases=%s entries=%s",
                     self.index_path,
                     len(self._index.aliases),
-                    len(self._index.surfaces),
+                    len(self._index.entries),
                 )
             except Exception:
                 logger.exception("local_autocomplete_index_failed path=%s", self.index_path)

@@ -1,7 +1,6 @@
 import asyncio
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, Response, jsonify, request, stream_with_context
 from flask_cors import CORS
@@ -77,11 +76,28 @@ main_limit, autocomplete_limit = attach_global_limiter(
 assert API_KEY, "API_KEY must be set."
 OPENAI_CLIENT = create_openai_client(API_KEY, BASE_URL)
 LOCAL_AUTOCOMPLETE = LocalAutocomplete(AUTOCOMPLETE_INDEX_PATH)
-AUTOCOMPLETE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="autocomplete-api")
 
 
 def _sse_event(name: str, payload: object) -> str:
     return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _parse_autocomplete_request():
+    data = request.json or {}
+    timestamp = data.get("timestamp", 0)
+    if abs(time.time() - timestamp / 1000) > 15:
+        return None, jsonify({"error": "Invalid request."}), 403
+
+    partial_input = (data.get("partialInput") or data.get("partial_input") or "").strip()
+    preferred_language = data.get("preferredLanguage", "auto")
+    return {
+        "partial_input": partial_input,
+        "preferred_language": preferred_language,
+    }, None, None
+
+
+def _autocomplete_user_content(preferred_language: str, partial_input: str) -> str:
+    return (f"Language: {preferred_language}\n" if preferred_language != "auto" else "") + f"Input: {partial_input}"
 
 
 @app.route("/api/lookup", methods=["POST"])
@@ -96,10 +112,10 @@ def lookup_word():
     preferred_language = data.get("preferredLanguage", "auto")
     query = query.strip() if isinstance(query, str) else ""
     if not query:
-        print("No query provided in the request.")
+        logging.warning("lookup_missing_query")
         return jsonify({"error": "No query provided"}), 400
     if model not in MODELS:
-        print(f"Unsupported model requested: {model}")
+        logging.warning("lookup_unsupported_model model=%s", model)
         return jsonify({"error": f"Model '{model}' not supported."}), 400
 
     client = OPENAI_CLIENT
@@ -141,7 +157,7 @@ def lookup_word():
             response = asyncio.run(fetch_lookup_result())
 
             content = response.choices[0].message.content
-            print(f"Raw response content: {content}")
+            logging.info("lookup_response_received query=%s content_length=%d", query, len(content or ""))
             yield _sse_event("result", safe_json(content))
         except Exception as exc:
             logging.exception("lookup_generate_failed query=%s", query)
@@ -158,71 +174,77 @@ def lookup_word():
     )
 
 
-@app.route("/api/autocomplete", methods=["POST"])
+@app.route("/api/autocomplete/local", methods=["POST"])
 @autocomplete_limit
-def autocomplete():
-    data = request.json or {}
-    timestamp = data.get("timestamp", 0)
-    if abs(time.time() - timestamp / 1000) > 15:
-        return jsonify({"error": "Invalid request."}), 403
-    partial_input = data.get("partialInput") or data.get("partial_input") or ""
-    preferred_language = data.get("preferredLanguage", "auto")
-    print(f"Autocomplete request received. Preferred language: {preferred_language}, Partial input: {partial_input}")
-    partial_input = partial_input.strip()
+def autocomplete_local():
+    parsed, error_response, status_code = _parse_autocomplete_request()
+    if error_response is not None:
+        return error_response, status_code
+
+    partial_input = parsed["partial_input"]
+    preferred_language = parsed["preferred_language"]
+    logging.info(
+        "autocomplete_local_request preferred_language=%s input_length=%d",
+        preferred_language,
+        len(partial_input),
+    )
+
+    if not partial_input:
+        return jsonify({"suggestions": []})
+
+    try:
+        suggestions = LOCAL_AUTOCOMPLETE.search(
+            partial_input,
+            preferred_language=preferred_language,
+            limit=3,
+        )
+    except Exception as exc:
+        logging.exception("local_autocomplete_failed query=%s", partial_input)
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify({"suggestions": suggestions})
+
+
+@app.route("/api/autocomplete/llm", methods=["POST"])
+@autocomplete_limit
+def autocomplete_llm():
+    parsed, error_response, status_code = _parse_autocomplete_request()
+    if error_response is not None:
+        return error_response, status_code
+
+    partial_input = parsed["partial_input"]
+    preferred_language = parsed["preferred_language"]
+    logging.info(
+        "autocomplete_llm_request preferred_language=%s input_length=%d",
+        preferred_language,
+        len(partial_input),
+    )
+
     if not partial_input:
         return jsonify({"suggestions": []})
 
     client = OPENAI_CLIENT
 
-    @stream_with_context
-    def generate():
-        async def fetch_api_suggestions() -> list[str]:
-            response = await client.chat.completions.create(
-                model=FAST_MODEL,
-                messages=[
-                    {"role": "system", "content": AUTOCOMPLETE_PROMPT},
-                    {
-                        "role": "user",
-                        "content": (f"Language: {preferred_language}\n" if preferred_language != "auto" else "")
-                        + f"Input: {partial_input}",
-                    },
-                ],
-                temperature=0,
-                max_tokens=32,
-            )
-            content = response.choices[0].message.content or ""
-            return parse_autocomplete_suggestions(content)
+    async def fetch_api_suggestions() -> list[str]:
+        response = await client.chat.completions.create(
+            model=FAST_MODEL,
+            messages=[
+                {"role": "system", "content": AUTOCOMPLETE_PROMPT},
+                {"role": "user", "content": _autocomplete_user_content(preferred_language, partial_input)},
+            ],
+            temperature=0,
+            max_tokens=32,
+        )
+        content = response.choices[0].message.content or ""
+        return parse_autocomplete_suggestions(content)
 
-        api_future = AUTOCOMPLETE_EXECUTOR.submit(lambda: asyncio.run(fetch_api_suggestions()))
-        local_suggestions: list[str] = []
-        try:
-            local_suggestions = LOCAL_AUTOCOMPLETE.search(
-                partial_input,
-                preferred_language=preferred_language,
-                limit=3,
-            )
-        except Exception as exc:
-            logging.exception("local_autocomplete_failed query=%s", partial_input)
-            yield _sse_event("error", {"stage": "local", "message": str(exc)})
-        yield _sse_event("local", {"suggestions": local_suggestions})
+    try:
+        suggestions = asyncio.run(fetch_api_suggestions())
+    except Exception as exc:
+        logging.exception("api_autocomplete_failed query=%s", partial_input)
+        return jsonify({"error": str(exc)}), 500
 
-        api_suggestions: list[str] = []
-        try:
-            api_suggestions = api_future.result()
-        except Exception as exc:
-            logging.exception("api_autocomplete_failed query=%s", partial_input)
-            yield _sse_event("error", {"stage": "api", "message": str(exc)})
-        yield _sse_event("api", {"suggestions": api_suggestions})
-
-    return Response(
-        generate(),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
-        },
-    )
+    return jsonify({"suggestions": suggestions})
 
 
 @app.route("/api/generate-sentence", methods=["POST"])
@@ -253,11 +275,11 @@ def generate_sentence():
         response = asyncio.run(fetch_sentence_result())
 
         content = response.choices[0].message.content
-        print(f"Lucky response: {content}")
+        logging.info("lucky_response_received word_count=%d content_length=%d", len(words), len(content or ""))
         return jsonify(safe_json(content))
 
     except Exception as e:
-        print(f"Error: {e}")
+        logging.exception("generate_sentence_failed")
         return jsonify({"error": str(e)}), 500
 
 

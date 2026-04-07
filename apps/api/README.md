@@ -1,6 +1,6 @@
 # API Backend
 
-This backend serves the normal dictionary API, and it can also use a local autocomplete index file before asking the remote LLM.
+This backend serves the normal dictionary API, and it exposes separate local and LLM autocomplete endpoints.
 
 ## Local autocomplete file
 
@@ -22,7 +22,7 @@ You can override the path with:
 AUTOCOMPLETE_INDEX_PATH=/absolute/path/to/autocomplete.compact.xz
 ```
 
-If the file is missing, the backend still starts. `/api/autocomplete` still works, but the first `local` SSE event returns an empty list.
+If the file is missing, the backend still starts. `/api/autocomplete/local` still works, but it returns an empty list.
 
 ## How to build the local autocomplete file
 
@@ -52,13 +52,25 @@ The build uses these datasets and local files:
   - local file: `apps/api/data/cc-cedict.txt.gz`
 - `JMdict`
   - local file: `apps/api/data/JMdict_e.gz`
-- `SCOWL`
-  - local file: `apps/api/data/scowl-2020.12.07.tar.gz`
+- `CMUdict`
+  - local file: `apps/api/data/cmudict.dict`
 - `wordfreq`
   - Python package installed from `apps/api/requirements-build.txt`
   - used with CJK extras so Chinese and Japanese frequency lookups work during the build
 
-The script also requires the Python package `wordfreq[cjk]` from `apps/api/requirements-build.txt`.
+The build environment must install the CJK extras from `apps/api/requirements-build.txt`:
+
+```bash
+pip install "wordfreq[cjk]"
+```
+
+Without the `cjk` extras, Japanese frequency lookups can fail at build time.
+
+On Windows, `wordfreq[cjk]` pulls in `mecab-python3` for Japanese tokenization. The upstream `mecab-python3` wheels also require the Microsoft Visual C++ Redistributable, so a successful `pip install` is not sufficient by itself. Verify the runtime with:
+
+```bash
+python -c "from wordfreq import zipf_frequency; print(zipf_frequency('私', 'ja'))"
+```
 
 ## Source data and licenses
 
@@ -72,10 +84,10 @@ The script also requires the Python package `wordfreq[cjk]` from `apps/api/requi
   - license: `CC BY-SA 4.0`
   - page: `https://www.edrdg.org/edrdg/licence.html`
 
-- `SCOWL`
-  - download source: `https://downloads.sourceforge.net/wordlist/scowl-2020.12.07.tar.gz`
-  - license: `SCOWL copyright notice / permissive license in the tarball Copyright file`
-  - page: `http://wordlist.aspell.net/`
+- `CMUdict`
+  - download source: `https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict`
+  - license: `BSD-2-Clause`
+  - page: `https://github.com/cmusphinx/cmudict`
 
 - `wordfreq`
   - download source: `https://pypi.org/project/wordfreq/`
@@ -100,9 +112,9 @@ export AUTOCOMPLETE_INDEX_PATH="/absolute/path/to/autocomplete.compact.xz"
 python apps/api/app.py
 ```
 
-## SSE endpoints
+## Autocomplete endpoints
 
-### `POST /api/autocomplete`
+### `POST /api/autocomplete/local`
 
 Request body:
 
@@ -116,23 +128,32 @@ Request body:
 
 Response type:
 
-```text
-text/event-stream
+```json
+{
+  "suggestions": [
+    {"surface": "おやすみ", "reading": "おやすみ", "lang": "ja"}
+  ]
+}
 ```
 
-Event order:
+### `POST /api/autocomplete/llm`
 
-1. `local`
-2. `api`
+Request body:
 
-Example:
+```json
+{
+  "partialInput": "oyasu",
+  "preferredLanguage": "ja",
+  "timestamp": 1710000000000
+}
+```
 
-```text
-event: local
-data: {"suggestions":["おやすみ","おやすみなさい"]}
+Response type:
 
-event: api
-data: {"suggestions":["おやすみ","おやす","おやすみなさい"]}
+```json
+{
+  "suggestions": ["おやすみ", "おやす", "おやすみなさい"]
+}
 ```
 
 ### `POST /api/lookup`
@@ -158,4 +179,4 @@ Event order:
 - `MODELS`
 - `FAST_MODEL`
 
-`FAST_MODEL` is only used by backend autocomplete. The frontend no longer sends a `model` field for `/api/autocomplete`.
+`FAST_MODEL` is only used by backend autocomplete. The frontend no longer sends a `model` field for autocomplete requests.

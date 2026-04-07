@@ -65,11 +65,11 @@ Place the contents of `apps/web/dist` on your web server.
     *You should see "Running on http://127.0.0.1:5000"*
 
 3.  **Optional local autocomplete index:**
-    The backend can serve a local-first autocomplete stage before the remote LLM stage. It looks for a generated local autocomplete file at:
+    The backend can serve local and LLM autocomplete through separate JSON endpoints. It looks for a generated local autocomplete file at:
     - default path: `apps/api/data/autocomplete.compact.xz`
     - override env var: `AUTOCOMPLETE_INDEX_PATH`
 
-    This generated file is intentionally not committed to git. If the file is missing, `/api/autocomplete` still works, but the initial `local` SSE event will return an empty suggestion list.
+    This generated file is intentionally not committed to git. If the file is missing, `/api/autocomplete/local` still works, but it returns an empty suggestion list.
 
     Build it with:
     ```bash
@@ -81,7 +81,7 @@ Place the contents of `apps/web/dist` on your web server.
     - where the source datasets and generated file should live
     - the single build command that downloads missing source lexicons and writes the generated file
     - how to point the backend at it
-    - what the SSE responses look like
+    - what the autocomplete JSON responses look like
     - the upstream dataset sources and licence notes for the local autocomplete build
 
 4. **For public usage:**
