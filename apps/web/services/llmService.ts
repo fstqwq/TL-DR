@@ -210,9 +210,10 @@ const normalizeLocalSuggestions = (value: unknown): LocalAutocompleteSuggestion[
         const suggestion = item as Record<string, unknown>;
         const surface = toStringValue(suggestion.surface).trim();
         const reading = toStringValue(suggestion.reading).trim();
+        const meaning = toStringValue(suggestion.meaning).trim();
         const lang = suggestion.lang;
         if (!surface || (lang !== "zh" && lang !== "en" && lang !== "ja")) return [];
-        return [{ surface, reading, lang }];
+        return [{ surface, reading, meaning, lang }];
       })
     : [];
 

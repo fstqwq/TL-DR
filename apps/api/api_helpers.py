@@ -15,6 +15,16 @@ HTTP_TIMEOUT_SECONDS = 1.0
 LOOKUP_SOURCES_TIMEOUT_SECONDS = 2.0
 MAX_SOURCE_CHARS = 1200
 MAX_TOTAL_CHARS = 3200
+LOCAL_PROVIDER_NAMES = {
+    "cc-cedict": "CC-CEDICT",
+    "jmdict": "JMdict",
+    "cmudict": "CMUdict",
+}
+LOCAL_PROVIDER_URLS = {
+    "cc-cedict": "https://cc-cedict.org/wiki/",
+    "jmdict": "https://www.edrdg.org/jmdict/j_jmdict.html",
+    "cmudict": "https://github.com/cmusphinx/cmudict",
+}
 
 
 def create_openai_client(api_key: str, base_url: str) -> AsyncOpenAI:
@@ -378,8 +388,69 @@ async def _lookupdictionary_async(word: str) -> dict[str, object]:
     }
 
 
+def _format_local_dictionary_snippet(entry: dict[str, object]) -> str:
+    surface = str(entry.get("surface", "")).strip()
+    reading = str(entry.get("reading", "")).strip()
+    meaning = str(entry.get("meaning", "")).strip()
+    if not surface or not meaning:
+        return ""
+    header = f"{surface} [{reading}]" if reading else surface
+    return f"{header}\n{meaning}".strip()
+
+
+def _local_lookup_bundle(word: str, local_autocomplete) -> dict[str, object]:
+    if local_autocomplete is None:
+        return {"augmented_content": "", "sources": []}
+    try:
+        suggestions = local_autocomplete.search(word, preferred_language="auto", limit=8)
+        providers = local_autocomplete.providers() if hasattr(local_autocomplete, "providers") else {}
+    except Exception:
+        logger.exception("lookupdictionary_local_failed word=%s", word)
+        return {"augmented_content": "", "sources": []}
+
+    best_by_lang: dict[str, dict[str, object]] = {}
+    for suggestion in suggestions:
+        if not isinstance(suggestion, dict):
+            continue
+        lang = str(suggestion.get("lang", "")).strip()
+        if lang not in {"zh", "ja"}:
+            continue
+        meaning = str(suggestion.get("meaning", "")).strip()
+        if not meaning or lang in best_by_lang:
+            continue
+        best_by_lang[lang] = suggestion
+
+    local_sources: list[dict[str, object]] = []
+    local_snippets: list[str] = []
+    for lang in ("zh", "ja"):
+        entry = best_by_lang.get(lang)
+        if entry is None:
+            continue
+        provider_id = str(providers.get(lang, f"local-{lang}"))
+        provider_name = LOCAL_PROVIDER_NAMES.get(provider_id, provider_id)
+        provider_url = LOCAL_PROVIDER_URLS.get(provider_id, "")
+        snippet = _format_local_dictionary_snippet(entry)
+        if not snippet:
+            continue
+        local_sources.append(
+            {
+                "id": provider_id,
+                "name": provider_name,
+                "pageUrl": provider_url,
+                "fetchUrl": provider_url,
+                "preview": snippet[:MAX_SOURCE_CHARS],
+            }
+        )
+        local_snippets.append(snippet)
+
+    return {
+        "augmented_content": "\n\n".join(local_snippets)[:MAX_TOTAL_CHARS] if local_snippets else "",
+        "sources": local_sources,
+    }
+
+
 @lru_cache(maxsize=128)
-def lookupdictionary_bundle(word: str) -> dict[str, object]:
+def _lookupdictionary_remote_bundle(word: str) -> dict[str, object]:
     query = word.strip() if isinstance(word, str) else ""
     if not query:
         return {"augmented_content": "", "sources": []}
@@ -388,3 +459,23 @@ def lookupdictionary_bundle(word: str) -> dict[str, object]:
         return loop.run_until_complete(_lookupdictionary_async(query))
     finally:
         loop.close()
+
+
+def lookupdictionary_bundle(word: str, local_autocomplete=None) -> dict[str, object]:
+    query = word.strip() if isinstance(word, str) else ""
+    if not query:
+        return {"augmented_content": "", "sources": []}
+
+    remote_bundle = _lookupdictionary_remote_bundle(query)
+    local_bundle = _local_lookup_bundle(query, local_autocomplete)
+
+    local_sources = local_bundle.get("sources", [])
+    remote_sources = remote_bundle.get("sources", [])
+    local_content = str(local_bundle.get("augmented_content", "")).strip()
+    remote_content = str(remote_bundle.get("augmented_content", "")).strip()
+    parts = [part for part in (local_content, remote_content) if part]
+
+    return {
+        "augmented_content": "\n\n".join(parts)[:MAX_TOTAL_CHARS] if parts else "",
+        "sources": [*local_sources, *remote_sources],
+    }

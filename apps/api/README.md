@@ -13,16 +13,20 @@ apps/api/local_autocomplete.py
 At runtime it looks for this generated file by default:
 
 ```text
-apps/api/data/autocomplete.compact.xz
+apps/api/data/lexicon.json.xz
 ```
 
 You can override the path with:
 
 ```text
-AUTOCOMPLETE_INDEX_PATH=/absolute/path/to/autocomplete.compact.xz
+LOCAL_LEXICON_PATH=/absolute/path/to/lexicon.json.xz
 ```
 
+The backend still accepts the old `AUTOCOMPLETE_INDEX_PATH` env var for compatibility, but `LOCAL_LEXICON_PATH` is the preferred name now.
+
 If the file is missing, the backend still starts. `/api/autocomplete/local` still works, but it returns an empty list.
+
+The generated artifact is now `JSON+xz`, not pickle. It stores ranked dictionary entries with `surface`, `reading`, `lang`, `meaning`, and per-entry alias groups. The backend rebuilds the in-memory alias index at startup.
 
 ## How to build the local autocomplete file
 
@@ -44,7 +48,7 @@ What this script does:
 - downloads missing source data files
 - verifies the downloaded files
 - builds the local autocomplete index
-- writes the result to `apps/api/data/autocomplete.compact.xz`
+- writes the result to `apps/api/data/lexicon.json.xz`
 
 The build uses these datasets and local files:
 
@@ -56,7 +60,7 @@ The build uses these datasets and local files:
   - local file: `apps/api/data/cmudict.dict`
 - `wordfreq`
   - Python package installed from `apps/api/requirements-build.txt`
-  - used with CJK extras so Chinese and Japanese frequency lookups work during the build
+  - used with CJK extras so Chinese and Japanese frequency lookups work during the build-time ranking pass
 
 The build environment must install the CJK extras from `apps/api/requirements-build.txt`:
 
@@ -108,7 +112,7 @@ python apps/api/app.py
 If you want to use a different local autocomplete file path:
 
 ```bash
-export AUTOCOMPLETE_INDEX_PATH="/absolute/path/to/autocomplete.compact.xz"
+export LOCAL_LEXICON_PATH="/absolute/path/to/lexicon.json.xz"
 python apps/api/app.py
 ```
 
@@ -131,7 +135,7 @@ Response type:
 ```json
 {
   "suggestions": [
-    {"surface": "おやすみ", "reading": "おやすみ", "lang": "ja"}
+    {"surface": "おやすみ", "reading": "おやすみ", "meaning": "- good night", "lang": "ja"}
   ]
 }
 ```
@@ -170,6 +174,13 @@ Event order:
 2. `sources`
 3. `progress` with `stage=generate`
 4. `result`
+
+Lookup augmentation now also includes the local `zh/ja` dictionary entries when available. The local snippet format is:
+
+```text
+surface [reading]
+meaning
+```
 
 ## Frontend config
 

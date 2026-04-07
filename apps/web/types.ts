@@ -62,6 +62,7 @@ export interface AutocompleteResult {
 export interface LocalAutocompleteSuggestion {
   surface: string;
   reading: string;
+  meaning?: string;
   lang: 'zh' | 'en' | 'ja';
 }
 

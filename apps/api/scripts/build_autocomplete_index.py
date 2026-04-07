@@ -3,7 +3,6 @@ from __future__ import annotations
 import gzip
 import json
 import lzma
-import pickle
 import re
 import sys
 import tempfile
@@ -27,7 +26,7 @@ DATA_DIR = API_DIR / "data"
 CEDICT_PATH = DATA_DIR / "cc-cedict.txt.gz"
 JMDICT_PATH = DATA_DIR / "JMdict_e.gz"
 CMUDICT_PATH = DATA_DIR / "cmudict.dict"
-OUTPUT_PATH = DATA_DIR / "autocomplete.compact.xz"
+OUTPUT_PATH = DATA_DIR / "lexicon.json.xz"
 
 DATASET_DOWNLOADS = {
     "cedict": {
@@ -59,75 +58,93 @@ def build_proxy_opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
 
 
-def build_compact_index_from_rows(
-    rows: Iterable[tuple[str, str, str, str, str, float]],
+def dedupe_preserve_order(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def build_compact_index_from_entries(
+    entries: Iterable[tuple[dict[str, object], float]],
     output_path: Path,
     *,
     meta_extra: dict[str, object] | None = None,
-) -> dict[str, int]:
-    entry_ids: dict[tuple[str, str, str], int] = {}
-    source_ids: dict[str, int] = {}
-    entries: list[tuple[str, str, str]] = []
-    sources: list[str] = []
-    alias_buckets: dict[str, dict[tuple[int, int], int]] = {}
-    row_count = 0
-    kept_rows = 0
+) -> dict[str, object]:
+    prepared: list[tuple[float, str, str, str, str, dict[str, list[str]]]] = []
+    alias_count = 0
+    source_names: set[str] = set()
 
-    for alias_norm, surface, reading, lang, source, score in rows:
-        if not alias_norm or not surface:
+    for entry, score in entries:
+        surface = str(entry.get("surface", "")).strip()
+        reading = str(entry.get("reading", "")).strip()
+        lang = str(entry.get("lang", "")).strip()
+        meaning = str(entry.get("meaning", "")).strip()
+        raw_aliases = entry.get("aliases")
+        if not surface or lang not in {"zh", "ja", "en"} or not isinstance(raw_aliases, dict):
             continue
-        row_count += 1
 
-        entry_key = (surface, reading, lang)
-        entry_id = entry_ids.get(entry_key)
-        if entry_id is None:
-            entry_id = len(entries)
-            entry_ids[entry_key] = entry_id
-            entries.append(entry_key)
+        alias_map: dict[str, list[str]] = {}
+        for source, alias_values in raw_aliases.items():
+            if not isinstance(source, str) or not source:
+                continue
+            if not isinstance(alias_values, list):
+                continue
+            normalized = dedupe_preserve_order(
+                normalize_query(str(alias))
+                for alias in alias_values
+                if isinstance(alias, str) and alias.strip()
+            )
+            if not normalized:
+                continue
+            alias_map[source] = normalized
+            source_names.add(source)
+            alias_count += len(normalized)
 
-        source_id = source_ids.get(source)
-        if source_id is None:
-            source_id = len(sources)
-            source_ids[source] = source_id
-            sources.append(source)
+        if not alias_map:
+            continue
 
-        bucket = alias_buckets.setdefault(alias_norm, {})
-        score100 = int(round(float(score) * 100))
-        key = (entry_id, source_id)
-        prev = bucket.get(key)
-        if prev is None or score100 > prev:
-            bucket[key] = score100
-            if prev is None:
-                kept_rows += 1
+        prepared.append((float(score), lang, surface, reading, meaning, alias_map))
 
-    meta = {
-        "version": 2,
-        "source": "direct_rows",
-        "row_count": row_count,
-        "deduped_row_count": kept_rows,
-        "alias_count": len(alias_buckets),
-        "entry_count": len(entries),
-        "source_count": len(sources),
+    prepared.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
+    entries_payload = [
+        {
+            "surface": surface,
+            "reading": reading,
+            "lang": lang,
+            "meaning": meaning,
+            "aliases": alias_map,
+        }
+        for _, lang, surface, reading, meaning, alias_map in prepared
+    ]
+
+    meta: dict[str, object] = {
+        "version": 3,
+        "source": "direct_entries",
+        "entry_count": len(entries_payload),
+        "alias_count": alias_count,
+        "source_count": len(source_names),
+        "providers": {
+            "zh": "cc-cedict",
+            "ja": "jmdict",
+            "en": "cmudict",
+        },
     }
     if meta_extra:
         meta.update(meta_extra)
 
-    aliases = sorted(alias_buckets)
-    postings = [
-        [(sid, srcid, score100) for (sid, srcid), score100 in sorted(alias_buckets[alias].items())]
-        for alias in aliases
-    ]
     payload = {
         "meta": meta,
-        "aliases": aliases,
-        "postings": postings,
-        "entries": entries,
-        "sources": sources,
+        "entries": entries_payload,
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with lzma.open(output_path, "wb", preset=9) as handle:
-        pickle.dump(payload, handle, protocol=5)
+    with lzma.open(output_path, "wt", encoding="utf-8", preset=9) as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
     return meta
 
 
@@ -662,6 +679,186 @@ def romaji_variants(text: str) -> set[str]:
     return {item for item in variants if item}
 
 
+def format_cedict_meaning(definitions: str) -> str:
+    parts = dedupe_preserve_order(
+        segment.strip()
+        for segment in definitions.split("/")
+        if isinstance(segment, str) and segment.strip()
+    )
+    return "\n".join(f"- {part}" for part in parts)
+
+
+def format_jmdict_meaning(entry: ET.Element) -> str:
+    lines: list[str] = []
+    for sense in entry.findall("./sense"):
+        glosses = dedupe_preserve_order(
+            gloss.text.strip()
+            for gloss in sense.findall("./gloss")
+            if gloss.text and gloss.text.strip()
+        )
+        if not glosses:
+            continue
+        labels = dedupe_preserve_order(
+            node.text.strip()
+            for tag in ("pos", "field", "misc", "s_inf")
+            for node in sense.findall(f"./{tag}")
+            if node.text and node.text.strip()
+        )
+        body = "; ".join(glosses)
+        if labels:
+            lines.append(f"- ({'; '.join(labels)}) {body}")
+        else:
+            lines.append(f"- {body}")
+    return "\n".join(lines)
+
+
+def iter_cedict_entries(path: Path) -> Iterable[tuple[dict[str, object], float]]:
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = CEDICT_RE.match(line)
+            if not match:
+                continue
+            trad = match.group("trad")
+            simp = match.group("simp")
+            reading, pinyin_u, pinyin_v = normalize_pinyin(match.group("pinyin"))
+            meaning = format_cedict_meaning(match.group("defs"))
+            entry_score = max(wordfreq_score(simp, "zh"), wordfreq_score(trad, "zh"))
+
+            alias_map: dict[str, list[str]] = {
+                "cc-cedict:surface": dedupe_preserve_order([trad, simp]),
+            }
+            if pinyin_u:
+                alias_map["cc-cedict:pinyin"] = [pinyin_u]
+                fuzzy = sorted(pinyin_variants(pinyin_u) - {normalize_query(pinyin_u)})
+                if fuzzy:
+                    alias_map["cc-cedict:pinyin-fuzzy"] = fuzzy
+                mixed = sorted(chinese_mixed_aliases(simp, pinyin_u))
+                if mixed:
+                    alias_map["cc-cedict:mixed"] = mixed
+            if pinyin_v and pinyin_v != pinyin_u:
+                alias_map["cc-cedict:pinyin-v"] = [pinyin_v]
+                fuzzy_v = sorted(pinyin_variants(pinyin_v) - {normalize_query(pinyin_v)})
+                if fuzzy_v:
+                    alias_map["cc-cedict:pinyin-v-fuzzy"] = fuzzy_v
+
+            yield (
+                {
+                    "surface": simp,
+                    "reading": reading,
+                    "lang": "zh",
+                    "meaning": meaning,
+                    "aliases": alias_map,
+                },
+                entry_score,
+            )
+
+
+def iter_jmdict_entries(path: Path) -> Iterable[tuple[dict[str, object], float]]:
+    with gzip.open(path, "rb") as handle:
+        context = ET.iterparse(handle, events=("end",))
+        for _, elem in context:
+            if elem.tag != "entry":
+                continue
+            kebs = dedupe_preserve_order(node.text.strip() for node in elem.findall("./k_ele/keb") if node.text)
+            rebs = dedupe_preserve_order(node.text.strip() for node in elem.findall("./r_ele/reb") if node.text)
+            display = kebs[0] if kebs else (rebs[0] if rebs else "")
+            reading = rebs[0] if rebs else ""
+            meaning = format_jmdict_meaning(elem)
+            if not display:
+                elem.clear()
+                continue
+
+            entry_score = max((wordfreq_score(keb, "ja") for keb in kebs), default=0.0)
+            if not kebs:
+                entry_score = max((wordfreq_score(reb, "ja") for reb in rebs), default=0.0)
+
+            alias_map: dict[str, list[str]] = {}
+            if kebs:
+                alias_map["jmdict:surface"] = kebs
+            if rebs:
+                alias_map["jmdict:reading"] = rebs
+                romaji_aliases: list[str] = []
+                romaji_fuzzy_aliases: list[str] = []
+                for reb in rebs:
+                    base_romaji = kana_to_romaji(reb)
+                    for romaji in sorted(romaji_variants(reb)):
+                        normalized = normalize_query(romaji)
+                        if not normalized:
+                            continue
+                        if romaji == base_romaji:
+                            romaji_aliases.append(normalized)
+                        else:
+                            romaji_fuzzy_aliases.append(normalized)
+                if romaji_aliases:
+                    alias_map["jmdict:romaji"] = dedupe_preserve_order(romaji_aliases)
+                if romaji_fuzzy_aliases:
+                    alias_map["jmdict:romaji-fuzzy"] = dedupe_preserve_order(romaji_fuzzy_aliases)
+
+            yield (
+                {
+                    "surface": display,
+                    "reading": reading,
+                    "lang": "ja",
+                    "meaning": meaning,
+                    "aliases": alias_map,
+                },
+                entry_score,
+            )
+            elem.clear()
+
+
+def iter_cmudict_entries(path: Path) -> Iterable[tuple[dict[str, object], float]]:
+    current_word = ""
+    current_readings: list[str] = []
+
+    def flush() -> Iterable[tuple[dict[str, object], float]]:
+        if not current_word or not current_readings:
+            return []
+        reading = " ".join(current_readings)
+        return [
+            (
+                {
+                    "surface": current_word,
+                    "reading": reading,
+                    "lang": "en",
+                    "meaning": "",
+                    "aliases": {
+                        "cmudict:word": [current_word],
+                    },
+                },
+                wordfreq_score(current_word, "en"),
+            )
+        ]
+
+    with path.open("rt", encoding="utf-8", errors="replace") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith(";;;"):
+                continue
+            match = re.match(r"^(?P<word>\S+)\s+(?P<pron>.+)$", line)
+            if not match:
+                continue
+            raw_word = match.group("word")
+            pronunciation = match.group("pron")
+            word = normalize_cmudict_word(raw_word)
+            ipa = arpabet_to_ipa(pronunciation)
+            if not word or not ipa:
+                continue
+            if current_word and word != current_word:
+                yield from flush()
+                current_word = word
+                current_readings = [ipa]
+                continue
+            if not current_word:
+                current_word = word
+            if ipa not in current_readings:
+                current_readings.append(ipa)
+        yield from flush()
+
+
 def iter_cedict_rows(path: Path) -> Iterable[tuple[str, str, str, str, str, float]]:
     with gzip.open(path, "rt", encoding="utf-8") as handle:
         for raw_line in handle:
@@ -825,6 +1022,36 @@ def iter_all_rows(
     return wrapped_rows(), counts, meta
 
 
+def iter_all_entries(
+    cedict_path: Path,
+    jmdict_path: Path,
+    cmudict_path: Path,
+) -> tuple[Iterable[tuple[dict[str, object], float]], Counter[str], dict[str, object]]:
+    counts = Counter()
+    meta = {
+        "cedict_path": str(cedict_path),
+        "jmdict_path": str(jmdict_path),
+        "cmudict_path": str(cmudict_path),
+    }
+
+    def wrapped_entries() -> Iterable[tuple[dict[str, object], float]]:
+        source_iters = (
+            ("cedict", iter_cedict_entries(cedict_path)),
+            ("jmdict", iter_jmdict_entries(jmdict_path)),
+            ("cmudict", iter_cmudict_entries(cmudict_path)),
+        )
+        for source_name, entries in source_iters:
+            for entry, score in entries:
+                lang = str(entry.get("lang", ""))
+                if not entry.get("surface"):
+                    continue
+                counts[f"{source_name}_entries"] += 1
+                counts[f"{lang}_entries"] += 1
+                yield entry, score
+
+    return wrapped_entries(), counts, meta
+
+
 def build_artifact(
     output_path: Path = OUTPUT_PATH,
     cedict_path: Path = CEDICT_PATH,
@@ -837,13 +1064,13 @@ def build_artifact(
         print(f"[build] remove existing artifact {output_path}")
         output_path.unlink()
 
-    rows, counts, meta = iter_all_rows(
+    entries, counts, meta = iter_all_entries(
         cedict_path=cedict_path,
         jmdict_path=jmdict_path,
         cmudict_path=cmudict_path,
     )
     print("[build] compiling compact index")
-    compact_meta = build_compact_index_from_rows(rows, output_path, meta_extra={"builder": meta})
+    compact_meta = build_compact_index_from_entries(entries, output_path, meta_extra={"builder": meta})
     print(f"[build] ok {output_path}")
     return {"counts": dict(counts), "meta": compact_meta}
 

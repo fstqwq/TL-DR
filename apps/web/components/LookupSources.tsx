@@ -19,7 +19,7 @@ export const LookupSources: React.FC<LookupSourcesProps> = ({
     <div className={className}>
       <div className="mb-3 flex items-center gap-2 text-slate-700">
         <Globe size={16} />
-        <h3 className="text-sm font-semibold uppercase tracking-wide">{title}</h3>
+        <h3 className="text-xs font-semibold uppercase tracking-wide">{title}</h3>
       </div>
       <div className="space-y-3">
         {sources.map((source) => (
@@ -30,10 +30,10 @@ export const LookupSources: React.FC<LookupSourcesProps> = ({
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="font-medium text-slate-800">{source.name}</span>
+                  <span className="text-sm font-medium text-slate-800">{source.name}</span>
                 </div>
                 {source.preview && (
-                  <p className="mt-1 line-clamp-2 text-sm text-slate-500">{source.preview}</p>
+                  <p className="mt-1 line-clamp-2 text-xs text-slate-500">{source.preview}</p>
                 )}
               </div>
               <a
@@ -48,7 +48,7 @@ export const LookupSources: React.FC<LookupSourcesProps> = ({
               </a>
             </summary>
             <div className="border-t border-slate-200 bg-white p-4">
-              <pre className="whitespace-pre-wrap break-words rounded-lg bg-slate-50 p-3 font-mono text-xs leading-6 text-slate-700">
+              <pre className="whitespace-pre-wrap break-words rounded-lg bg-slate-50 p-3 font-mono text-[11px] leading-5 text-slate-700 sm:text-xs">
                 {source.preview}
               </pre>
             </div>

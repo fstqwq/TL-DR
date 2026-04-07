@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bisect
+import json
 import logging
 import lzma
 import pickle
@@ -289,6 +290,7 @@ def query_variants(text: str) -> list[str]:
 LATIN_TYPO_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 TYPO_VARIANT_LIMIT = 512
 TYPO_ROW_LIMIT = 64
+COVERAGE_BONUS_MAX = 12.0
 
 
 def typo_neighbors(text: str, limit: int = TYPO_VARIANT_LIMIT) -> list[tuple[str, float]]:
@@ -326,6 +328,42 @@ def typo_neighbors(text: str, limit: int = TYPO_VARIANT_LIMIT) -> list[tuple[str
     return variants
 
 
+def split_query_segments_with_spans(text: str) -> list[tuple[str, tuple[int, int]]]:
+    text = unicodedata.normalize("NFKC", text).strip()
+    raw_tokens = [token for token in re.split(r"\s+", text) if token]
+    segments: list[tuple[str, tuple[int, int]]] = []
+    cursor = 0
+    for token in raw_tokens:
+        current = ""
+        current_script = None
+        for ch in token:
+            if ch.isspace():
+                continue
+            script = detect_script(ch)
+            if current and script != current_script:
+                normalized = normalize_query(current)
+                if normalized:
+                    start = cursor
+                    cursor += len(normalized)
+                    segments.append((current, (start, cursor)))
+                current = ch
+                current_script = script
+            else:
+                current += ch
+                current_script = script
+        if current:
+            normalized = normalize_query(current)
+            if normalized:
+                start = cursor
+                cursor += len(normalized)
+                segments.append((current, (start, cursor)))
+    if not segments and text:
+        normalized = normalize_query(text)
+        if normalized:
+            return [(text, (0, len(normalized)))]
+    return segments
+
+
 def allow_row_for_script(row: dict[str, object], script: str) -> bool:
     source = str(row["source"])
     lang = str(row["lang"])
@@ -342,7 +380,7 @@ def rank_candidate(
     typo_penalty: float = 0.0,
     preferred_language: str = "auto",
 ) -> float:
-    score = float(row["score"])
+    score = -float(row.get("posting_rank", 0))
     alias_norm = str(row["alias_norm"])
     lang = str(row["lang"])
     preferred_language = normalize_preferred_language(preferred_language)
@@ -361,21 +399,105 @@ def rank_candidate(
 @dataclass
 class CompactIndex:
     aliases: list[str]
-    postings: list[list[tuple[int, int, int]]]
-    entries: list[tuple[str, str, str]]
-    sources: list[str]
+    postings: list[list[tuple[int, str]]]
+    entries: list[dict[str, str]]
     meta: dict[str, object]
 
 
 def load_compact_index(path: Path) -> CompactIndex:
     with lzma.open(path, "rb") as handle:
-        payload = pickle.load(handle)
+        raw = handle.read()
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+        return _load_json_compact_index(payload)
+    except Exception:
+        payload = pickle.loads(raw)
+        return _load_legacy_compact_index(payload)
+
+
+def _load_json_compact_index(payload: dict[str, object]) -> CompactIndex:
+    raw_entries = payload.get("entries")
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    if not isinstance(raw_entries, list):
+        raise ValueError("invalid compact index: entries missing")
+
+    entries: list[dict[str, str]] = []
+    alias_buckets: dict[str, list[tuple[int, str]]] = {}
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        surface = str(raw_entry.get("surface", "")).strip()
+        reading = str(raw_entry.get("reading", "")).strip()
+        lang = str(raw_entry.get("lang", "")).strip()
+        meaning = str(raw_entry.get("meaning", "")).strip()
+        aliases_by_source = raw_entry.get("aliases")
+        if not surface or lang not in {"zh", "ja", "en"}:
+            continue
+
+        entries.append(
+            {
+                "surface": surface,
+                "reading": reading,
+                "lang": lang,
+                "meaning": meaning,
+            }
+        )
+        entry_id = len(entries) - 1
+
+        if not isinstance(aliases_by_source, dict):
+            continue
+        for source, alias_values in aliases_by_source.items():
+            if not isinstance(source, str) or not isinstance(alias_values, list):
+                continue
+            seen_for_source: set[str] = set()
+            for alias in alias_values:
+                alias_norm = normalize_query(str(alias))
+                if not alias_norm or alias_norm in seen_for_source:
+                    continue
+                seen_for_source.add(alias_norm)
+                alias_buckets.setdefault(alias_norm, []).append((entry_id, source))
+
+    aliases = sorted(alias_buckets)
+    postings = [alias_buckets[alias] for alias in aliases]
     return CompactIndex(
-        aliases=payload["aliases"],
-        postings=payload["postings"],
-        entries=payload["entries"],
-        sources=payload["sources"],
-        meta=payload["meta"],
+        aliases=aliases,
+        postings=postings,
+        entries=entries,
+        meta=dict(meta),
+    )
+
+
+def _load_legacy_compact_index(payload: dict[str, object]) -> CompactIndex:
+    raw_entries = payload.get("entries")
+    raw_postings = payload.get("postings")
+    raw_sources = payload.get("sources")
+    raw_aliases = payload.get("aliases")
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    if not isinstance(raw_entries, list) or not isinstance(raw_postings, list) or not isinstance(raw_sources, list) or not isinstance(raw_aliases, list):
+        raise ValueError("invalid legacy compact index")
+
+    entries = [
+        {
+            "surface": str(surface),
+            "reading": str(reading),
+            "lang": str(lang),
+            "meaning": "",
+        }
+        for surface, reading, lang in raw_entries
+    ]
+    sources = [str(source) for source in raw_sources]
+    postings: list[list[tuple[int, str]]] = []
+    for bucket in raw_postings:
+        posting_bucket: list[tuple[int, str]] = []
+        for entry_id, source_id, _score100 in bucket:
+            posting_bucket.append((int(entry_id), sources[int(source_id)]))
+        postings.append(posting_bucket)
+
+    return CompactIndex(
+        aliases=[str(alias) for alias in raw_aliases],
+        postings=postings,
+        entries=entries,
+        meta=dict(meta),
     )
 
 
@@ -383,17 +505,18 @@ def _rows_for_alias_range(index: CompactIndex, start: int, end: int, limit: int)
     rows: list[dict[str, object]] = []
     for pos in range(start, end):
         alias_norm = index.aliases[pos]
-        for entry_id, source_id, score100 in index.postings[pos]:
-            surface, reading, lang = index.entries[entry_id]
+        for posting_rank, (entry_id, source) in enumerate(index.postings[pos]):
+            entry = index.entries[entry_id]
             rows.append(
                 {
                     "entry_id": entry_id,
                     "alias_norm": alias_norm,
-                    "surface": surface,
-                    "reading": reading,
-                    "lang": lang,
-                    "source": index.sources[source_id],
-                    "score": score100 / 100.0,
+                    "surface": entry["surface"],
+                    "reading": entry["reading"],
+                    "meaning": entry.get("meaning", ""),
+                    "lang": entry["lang"],
+                    "source": source,
+                    "posting_rank": posting_rank,
                 }
             )
             if len(rows) >= limit:
@@ -429,6 +552,7 @@ def _collect_prefix_matches(
                 "entry_id": key,
                 "surface": row["surface"],
                 "reading": row["reading"],
+                "meaning": row.get("meaning", ""),
                 "lang": row["lang"],
                 "source": row["source"],
                 "score": score,
@@ -483,30 +607,69 @@ def search_compact_index(
     variants = query_variants(query)
     segments = split_query_segments(query)
     if len(variants) > 1 or len(segments) > 1:
+        query_norm = normalize_query(query)
+        total_query_len = max(1, len(query_norm))
         merged: dict[int, dict[str, object]] = {}
-        search_inputs = [query]
-        search_inputs.extend(variant for variant in variants[1:] if variant != query)
-        if len(segments) > 1:
-            search_inputs.extend(segment for segment in segments if segment != query)
+        search_requests: list[tuple[str, set[int]]] = [(query, set(range(total_query_len)))]
+        seen_requests: set[tuple[str, tuple[int, ...]]] = set()
+        seen_requests.add((query, tuple(range(total_query_len))))
 
-        for search_input in search_inputs:
+        for variant in variants[1:]:
+            if variant == query:
+                continue
+            request_key = (variant, tuple(range(total_query_len)))
+            if request_key in seen_requests:
+                continue
+            seen_requests.add(request_key)
+            search_requests.append((variant, set(range(total_query_len))))
+
+        if len(segments) > 1:
+            for segment, (start, end) in split_query_segments_with_spans(query):
+                if segment == query:
+                    continue
+                coverage_points = set(range(start, end))
+                request_key = (segment, tuple(sorted(coverage_points)))
+                if request_key in seen_requests:
+                    continue
+                seen_requests.add(request_key)
+                search_requests.append((segment, coverage_points))
+
+        for search_input, coverage_points in search_requests:
+            coverage_bonus = (len(coverage_points) / total_query_len) * COVERAGE_BONUS_MAX
             for item in search_single_segment(index, search_input, preferred_language=preferred_language, limit=50):
                 key = int(item["entry_id"])
                 bucket = merged.get(key)
+                item_base_score = float(item["score"])
                 if bucket is None:
                     merged[key] = {
                         "entry_id": key,
                         "surface": item["surface"],
                         "reading": item["reading"],
+                        "meaning": item.get("meaning", ""),
                         "lang": item["lang"],
                         "source": item["source"],
-                        "score": float(item["score"]),
+                        "base_score": item_base_score,
+                        "coverage_points": set(coverage_points),
+                        "coverage_len": len(coverage_points),
+                        "score": item_base_score + coverage_bonus,
                     }
                 else:
-                    bucket["score"] = max(float(bucket["score"]), float(item["score"]))
+                    combined_points = set(bucket["coverage_points"]) | set(coverage_points)
+                    bucket["coverage_points"] = combined_points
+                    bucket["coverage_len"] = len(combined_points)
+                    bucket["base_score"] = max(float(bucket["base_score"]), item_base_score)
+                    bucket["score"] = float(bucket["base_score"]) + (
+                        (len(combined_points) / total_query_len) * COVERAGE_BONUS_MAX
+                    )
 
         ranked = list(merged.values())
-        ranked.sort(key=lambda item: (-float(item["score"]), str(item["surface"])))
+        ranked.sort(
+            key=lambda item: (
+                -float(item["score"]),
+                -int(item.get("coverage_len", 0)),
+                str(item["surface"]),
+            )
+        )
         return ranked[:limit]
 
     return search_single_segment(index, query, preferred_language=preferred_language, limit=limit)
@@ -536,10 +699,24 @@ class LocalAutocomplete:
             {
                 "surface": str(item["surface"]),
                 "reading": str(item.get("reading", "")),
+                "meaning": str(item.get("meaning", "")),
                 "lang": str(item["lang"]),
             }
             for item in results[:limit]
         ]
+
+    def providers(self) -> dict[str, str]:
+        index = self._ensure_index()
+        if index is None:
+            return {}
+        providers = index.meta.get("providers")
+        if not isinstance(providers, dict):
+            return {}
+        return {
+            str(lang): str(provider)
+            for lang, provider in providers.items()
+            if isinstance(lang, str) and isinstance(provider, str)
+        }
 
     def _ensure_index(self) -> CompactIndex | None:
         if self._index is not None:

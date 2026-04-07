@@ -66,8 +66,8 @@ Place the contents of `apps/web/dist` on your web server.
 
 3.  **Optional local autocomplete index:**
     The backend can serve local and LLM autocomplete through separate JSON endpoints. It looks for a generated local autocomplete file at:
-    - default path: `apps/api/data/autocomplete.compact.xz`
-    - override env var: `AUTOCOMPLETE_INDEX_PATH`
+    - default path: `apps/api/data/lexicon.json.xz`
+    - override env var: `LOCAL_LEXICON_PATH` (preferred) or `AUTOCOMPLETE_INDEX_PATH` (compat)
 
     This generated file is intentionally not committed to git. If the file is missing, `/api/autocomplete/local` still works, but it returns an empty suggestion list.
 
@@ -76,6 +76,15 @@ Place the contents of `apps/web/dist` on your web server.
     pip install -r apps/api/requirements-build.txt
     python apps/api/scripts/build_autocomplete_index.py
     ```
+
+    The generated artifact is `JSON+xz`. Each entry stores:
+    - `surface`
+    - `reading`
+    - `lang`
+    - `meaning`
+    - alias groups
+
+    The backend rebuilds the in-memory alias index at startup. Local `zh/ja` dictionary entries are also used as `/api/lookup` augmentation sources.
 
     See [apps/api/README.md](apps/api/README.md) for:
     - where the source datasets and generated file should live

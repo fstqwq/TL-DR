@@ -138,7 +138,7 @@ def lookup_word():
                 "progress",
                 {"stage": "augment", "message": "Collecting dictionary context"},
             )
-            lookup_bundle = lookupdictionary_bundle(query)
+            lookup_bundle = lookupdictionary_bundle(query, local_autocomplete=LOCAL_AUTOCOMPLETE)
             augmented_content = str(lookup_bundle.get("augmented_content", ""))
             yield _sse_event(
                 "sources",

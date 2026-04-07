@@ -14,8 +14,11 @@ DEFAULT_CONFIG_PATH = os.path.abspath(
 )
 CONFIG_PATH = os.environ.get("CONFIG_PATH", DEFAULT_CONFIG_PATH)
 AUTOCOMPLETE_INDEX_PATH = os.environ.get(
-    "AUTOCOMPLETE_INDEX_PATH",
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "autocomplete.compact.xz")),
+    "LOCAL_LEXICON_PATH",
+    os.environ.get(
+        "AUTOCOMPLETE_INDEX_PATH",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "lexicon.json.xz")),
+    ),
 )
 MAIN_RATE_LIMIT_PER_MINUTE = max(1, int(round(RATE_LIMIT)))
 AUTOCOMPLETE_RATE_LIMIT_PER_MINUTE = max(1, int(round(RATE_LIMIT * 3)))

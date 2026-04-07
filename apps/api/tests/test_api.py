@@ -210,6 +210,42 @@ class ApiEndpointsTestCase(unittest.TestCase):
             },
         )
 
+    def test_lookup_bundle_merges_local_dictionary_entry(self):
+        fake_local = MagicMock()
+        fake_local.search.return_value = [
+            {
+                "surface": "\u6d4b\u8bd5",
+                "reading": "c\u00e8 sh\u00ec",
+                "meaning": "- test\n- examine",
+                "lang": "zh",
+            }
+        ]
+        fake_local.providers.return_value = {"zh": "cc-cedict", "ja": "jmdict", "en": "cmudict"}
+
+        with patch.object(
+            api_helpers,
+            "_lookupdictionary_remote_bundle",
+            return_value={
+                "augmented_content": "remote preview",
+                "sources": [
+                    {
+                        "id": "wiktionary",
+                        "name": "Wiktionary",
+                        "pageUrl": "https://en.wiktionary.org/wiki/test",
+                        "fetchUrl": "https://en.wiktionary.org/w/index.php?title=test&action=raw",
+                        "preview": "remote preview",
+                    }
+                ],
+            },
+        ):
+            result = api_helpers.lookupdictionary_bundle("ceshi", local_autocomplete=fake_local)
+
+        self.assertEqual(result["sources"][0]["id"], "cc-cedict")
+        self.assertIn("\u6d4b\u8bd5 [c\u00e8 sh\u00ec]", result["sources"][0]["preview"])
+        self.assertIn("- test", result["augmented_content"])
+        self.assertIn("remote preview", result["augmented_content"])
+        fake_local.search.assert_called_once_with("ceshi", preferred_language="auto", limit=8)
+
     def test_http_get_text_uses_utf8_for_json_responses(self):
         class FakeResponse:
             def __init__(self):
