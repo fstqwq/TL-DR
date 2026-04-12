@@ -228,7 +228,7 @@ def autocomplete():
 @app.route("/api/generate-sentence", methods=["POST"])
 @main_limit
 def generate_sentence():
-    data = request.json
+    data = request.json or {}
     timestamp = data.get("timestamp", 0)
     if abs(time.time() - timestamp / 1000) > 15:
         return jsonify({"error": "Invalid request."}), 403
@@ -237,6 +237,9 @@ def generate_sentence():
 
     if not words or len(words) < 2:
         return jsonify({"error": "Not enough words provided."}), 400
+    if model not in MODELS:
+        print(f"Unsupported model requested: {model}")
+        return jsonify({"error": f"Model '{model}' not supported."}), 400
 
     try:
         client = OPENAI_CLIENT
