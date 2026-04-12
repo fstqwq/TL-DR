@@ -259,6 +259,22 @@ class ApiEndpointsTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json(), {"error": "Not enough words provided."})
 
+    def test_generate_sentence_rejects_unsupported_model(self):
+        response = self.client.post(
+            "/api/generate-sentence",
+            json={
+                "words": [
+                    {"word": "apple", "lang": "en"},
+                    {"word": "りんご", "lang": "ja"},
+                ],
+                "model": "totally/unknown-model",
+                "timestamp": int(time.time() * 1000),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {"error": "Model 'totally/unknown-model' not supported."})
+
 
 if __name__ == "__main__":
     unittest.main()
