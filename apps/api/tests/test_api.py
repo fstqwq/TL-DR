@@ -246,6 +246,19 @@ class ApiEndpointsTestCase(unittest.TestCase):
         self.assertIn("Input: meishi", kwargs["messages"][1]["content"])
         fake_local.search.assert_called_once_with("meishi", preferred_language="zh", limit=3)
 
+    def test_autocomplete_rejects_overly_long_partial_input(self):
+        response = self.client.post(
+            "/api/autocomplete",
+            json={
+                "partialInput": "a" * 129,
+                "preferredLanguage": "en",
+                "timestamp": int(time.time() * 1000),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {"suggestions": []})
+
     def test_generate_sentence_requires_two_words(self):
         response = self.client.post(
             "/api/generate-sentence",
