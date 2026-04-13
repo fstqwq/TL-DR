@@ -78,6 +78,7 @@ assert API_KEY, "API_KEY must be set."
 OPENAI_CLIENT = create_openai_client(API_KEY, BASE_URL)
 LOCAL_AUTOCOMPLETE = LocalAutocomplete(AUTOCOMPLETE_INDEX_PATH)
 AUTOCOMPLETE_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="autocomplete-api")
+MAX_AUTOCOMPLETE_INPUT_LENGTH = 128
 
 
 def _sse_event(name: str, payload: object) -> str:
@@ -171,6 +172,8 @@ def autocomplete():
     partial_input = partial_input.strip()
     if not partial_input:
         return jsonify({"suggestions": []})
+    if len(partial_input) > MAX_AUTOCOMPLETE_INPUT_LENGTH:
+        return jsonify({"suggestions": []}), 400
 
     client = OPENAI_CLIENT
 

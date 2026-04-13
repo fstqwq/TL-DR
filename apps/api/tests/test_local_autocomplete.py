@@ -8,7 +8,7 @@ API_DIR = ROOT_DIR / "apps" / "api"
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
-from local_autocomplete import CompactIndex, query_variants, search_compact_index  # noqa: E402
+from local_autocomplete import CompactIndex, query_variants, search_compact_index, typo_neighbors  # noqa: E402
 
 
 class LocalAutocompleteRankingTestCase(unittest.TestCase):
@@ -65,6 +65,9 @@ class LocalAutocompleteRankingTestCase(unittest.TestCase):
         results = search_compact_index(index, "cehsi", preferred_language="zh", limit=5)
 
         self.assertEqual(results[0]["surface"], "测试")
+
+    def test_typo_neighbors_ignores_overly_long_latin_input(self):
+        self.assertEqual(typo_neighbors("a" * 129), [])
 
 
 if __name__ == "__main__":
