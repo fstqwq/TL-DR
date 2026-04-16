@@ -14,7 +14,9 @@ API_DIR = ROOT_DIR / "apps" / "api"
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
+os.environ.setdefault("CONFIG_PATH", str(API_DIR / "config_example.json"))
 os.environ.setdefault("API_KEY", "unit-test-key")
+os.environ.setdefault("CLARIFAI_API_KEY", "unit-test-clarifai-key")
 os.environ.setdefault("RATE_LIMIT_STORAGE_URI", "memory://")
 
 import app as api_app  # noqa: E402
@@ -96,7 +98,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         ]
 
         with (
-            patch.object(api_app, "OPENAI_CLIENT", fake_client),
+            patch.object(api_app, "_client_for_model", return_value=fake_client) as client_selector,
             patch.object(
                 api_app,
                 "lookupdictionary_bundle",
@@ -127,13 +129,14 @@ class ApiEndpointsTestCase(unittest.TestCase):
             ],
         )
         self.assertEqual(fake_create.call_count, 1)
+        client_selector.assert_called_once_with(self.model_id)
 
     def test_lookup_handles_unicode_llm_content_without_console_encoding_failure(self):
-        fake_create = AsyncMock(return_value=make_chat_response('{"targetWord":"オーケストラ・アレンジャー"}'))
+        fake_create = AsyncMock(return_value=make_chat_response('{"targetWord":"オーケストラレーション"}'))
         fake_client = make_fake_client(fake_create)
 
         with (
-            patch.object(api_app, "OPENAI_CLIENT", fake_client),
+            patch.object(api_app, "_client_for_model", return_value=fake_client),
             patch.object(
                 api_app,
                 "lookupdictionary_bundle",
@@ -153,7 +156,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         events = parse_sse_events(response.get_data(as_text=True))
-        self.assertEqual(events[-1], ("result", {"targetWord": "オーケストラ・アレンジャー"}))
+        self.assertEqual(events[-1], ("result", {"targetWord": "オーケストラレーション"}))
 
     def test_lookup_helper_filters_failed_sources(self):
         fake_specs = (
@@ -214,8 +217,8 @@ class ApiEndpointsTestCase(unittest.TestCase):
         fake_local = MagicMock()
         fake_local.search.return_value = [
             {
-                "surface": "\u6d4b\u8bd5",
-                "reading": "c\u00e8 sh\u00ec",
+                "surface": "测试",
+                "reading": "cè shì",
                 "meaning": "- test\n- examine",
                 "lang": "zh",
             }
@@ -241,7 +244,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
             result = api_helpers.lookupdictionary_bundle("ceshi", local_autocomplete=fake_local)
 
         self.assertEqual(result["sources"][0]["id"], "cc-cedict")
-        self.assertIn("\u6d4b\u8bd5 [c\u00e8 sh\u00ec]", result["sources"][0]["preview"])
+        self.assertIn("测试 [cè shì]", result["sources"][0]["preview"])
         self.assertIn("- test", result["augmented_content"])
         self.assertIn("remote preview", result["augmented_content"])
         fake_local.search.assert_called_once_with("ceshi", preferred_language="auto", limit=8)
@@ -270,7 +273,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
             )
 
         self.assertIn("/ˈpɹiːvɪəs/", text)
-        self.assertNotIn("À", text)
+        self.assertNotIn("脌", text)
 
     def test_autocomplete_local_returns_json(self):
         fake_local = MagicMock()
@@ -297,7 +300,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         fake_create = AsyncMock(return_value=make_chat_response("<think>ignored</think>\nfood\nbusiness card\nnoun"))
         fake_client = make_fake_client(fake_create)
 
-        with patch.object(api_app, "OPENAI_CLIENT", fake_client):
+        with patch.object(api_app, "_client_for_model", return_value=fake_client) as client_selector:
             response = self.client.post(
                 "/api/autocomplete/llm",
                 json={
@@ -317,6 +320,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         self.assertIn("messages", kwargs)
         self.assertIn("Language: zh", kwargs["messages"][1]["content"])
         self.assertIn("Input: meishi", kwargs["messages"][1]["content"])
+        client_selector.assert_called_once_with(api_app.FAST_MODEL)
 
     def test_generate_sentence_requires_two_words(self):
         response = self.client.post(
@@ -330,6 +334,19 @@ class ApiEndpointsTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json(), {"error": "Not enough words provided."})
+
+    def test_generate_sentence_rejects_unknown_model(self):
+        response = self.client.post(
+            "/api/generate-sentence",
+            json={
+                "words": [{"word": "apple", "lang": "en"}, {"word": "test", "lang": "en"}],
+                "model": "unknown-model",
+                "timestamp": int(time.time() * 1000),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {"error": "Model 'unknown-model' not supported."})
 
 
 if __name__ == "__main__":

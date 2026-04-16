@@ -1,127 +1,133 @@
 # API Backend
 
-This backend serves the normal dictionary API, and it exposes separate local and LLM autocomplete endpoints.
+The Flask backend for TL;DR. It serves the dictionary lookup API and exposes separate local and LLM autocomplete endpoints.
 
-## Local autocomplete file
+## ⚙️ Configuration
 
-The local autocomplete code is in:
+The backend reads its config from `apps/api/config.json` by default. You can override the path with `CONFIG_PATH`:
 
-```text
-apps/api/local_autocomplete.py
+```bash
+export CONFIG_PATH="/absolute/path/to/tldr-api.json"
 ```
 
-At runtime it looks for this generated file by default:
+The config file shape is:
 
-```text
-apps/api/data/lexicon.json.xz
+```json
+{
+  "models": [
+    { "id": "deepseek-ai/DeepSeek-V3-0324", "name": "DeepSeek V3 0324" }
+  ],
+  "fast_model": "deepseek-ai/DeepSeek-V3-0324",
+  "model_providers": {
+    "deepseek-ai/DeepSeek-V3-0324": "hyperbolic"
+  },
+  "providers": {
+    "hyperbolic": {
+      "base_url": "https://api.hyperbolic.xyz/v1/",
+      "api_key": "HYPERBOLIC_API_KEY"
+    }
+  }
+}
 ```
 
-You can override the path with:
+> [!IMPORTANT]
+> - `providers.<name>.api_key` is the **name of an environment variable**, not the raw API key.
+> - Every model in `models` must also appear in `model_providers`.
+> - `fast_model` must also appear in `models` and `model_providers`.
 
-```text
-LOCAL_LEXICON_PATH=/absolute/path/to/lexicon.json.xz
+### Frontend Config
+
+`apps/web/public/config.json` controls the browser-side settings (`BACKEND_URL`, `MODELS`). The backend does not read that file — keep the frontend `MODELS` list aligned with the backend config manually, otherwise the browser may offer a model that the backend rejects.
+
+## 🚀 Running
+
+From the repo root:
+
+```bash
+export API_KEY="your_api_key"  # for the default sample config
+export RATE_LIMIT="60"      # requests per minute, optional
+python apps/api/app.py
 ```
 
-The backend still accepts the old `AUTOCOMPLETE_INDEX_PATH` env var for compatibility, but `LOCAL_LEXICON_PATH` is the preferred name now.
+You should see `Running on http://127.0.0.1:5000`.
 
-If the file is missing, the backend still starts. `/api/autocomplete/local` still works, but it returns an empty list.
+If your `providers` config uses a different environment variable name, export that name instead.
 
-The generated artifact is now `JSON+xz`, not pickle. It stores ranked dictionary entries with `surface`, `reading`, `lang`, `meaning`, and per-entry alias groups. The backend rebuilds the in-memory alias index at startup.
+### Environment Variables
 
-## How to build the local autocomplete file
+| Variable | Description | Default |
+|---|---|---|
+| `CONFIG_PATH` | Path to backend config file | `apps/api/config.json` |
+| `API_KEY` | LLM provider API key for the default sample config | — |
+| `RATE_LIMIT` | Max requests per minute | — |
+| `LOCAL_LEXICON_PATH` | Path to local autocomplete index | `apps/api/data/lexicon.json.xz` |
 
-Install the extra build dependency first:
+### Production Deployment
+
+For public deployments, do **not** expose the Flask dev server directly. Use a WSGI server (e.g. Gunicorn) behind a reverse proxy (e.g. Nginx), and consider customizing the authentication logic in `app.py`.
+
+## 📖 Local Autocomplete
+
+An optional offline dictionary index that provides instant suggestions without an LLM round-trip.
+
+- **Code:** `local_autocomplete.py`
+- **Generated file:** `data/lexicon.json.xz` (JSON + xz, not committed to git)
+- If the file is missing, the backend still starts — `/api/autocomplete/local` returns an empty list.
+
+Local `zh/ja` dictionary entries are also used to augment `/api/lookup` results when available.
+
+### Building the Index
 
 ```bash
 pip install -r apps/api/requirements-build.txt
-```
-
-Then run the build script from the repo root:
-
-```bash
 python apps/api/scripts/build_autocomplete_index.py
 ```
 
-What this script does:
+The build script will:
+1. Check for existing source data files in `apps/api/data/`
+2. Download any missing source files
+3. Build the ranked index → `apps/api/data/lexicon.json.xz`
 
-- checks whether the required source data files already exist in `apps/api/data/`
-- downloads missing source data files
-- verifies the downloaded files
-- builds the local autocomplete index
-- writes the result to `apps/api/data/lexicon.json.xz`
+Each entry stores: `surface`, `reading`, `lang`, `meaning`, and alias groups. The backend rebuilds the in-memory alias index at startup.
 
-The build uses these datasets and local files:
+### Source Datasets
 
-- `CC-CEDICT`
-  - local file: `apps/api/data/cc-cedict.txt.gz`
-- `JMdict`
-  - local file: `apps/api/data/JMdict_e.gz`
-- `CMUdict`
-  - local file: `apps/api/data/cmudict.dict`
-- `wordfreq`
-  - Python package installed from `apps/api/requirements-build.txt`
-  - used with CJK extras so Chinese and Japanese frequency lookups work during the build-time ranking pass
+| Dataset | Local File | License |
+|---|---|---|
+| [CC-CEDICT](https://cc-cedict.org/wiki/) | `data/cc-cedict.txt.gz` | CC BY-SA 4.0 |
+| [JMdict](https://www.edrdg.org/edrdg/licence.html) | `data/JMdict_e.gz` | CC BY-SA 4.0 |
+| [CMUdict](https://github.com/cmusphinx/cmudict) | `data/cmudict.dict` | BSD-2-Clause |
+| [wordfreq](https://github.com/rspeer/wordfreq/) | pip package | Apache-2.0 |
 
-The build environment must install the CJK extras from `apps/api/requirements-build.txt`:
+> [!WARNING]
+> **Windows users:** `wordfreq[cjk]` pulls in `mecab-python3`, which requires the Microsoft Visual C++ Redistributable. A successful `pip install` alone is not enough — verify with:
+> ```bash
+> python -c "from wordfreq import zipf_frequency; print(zipf_frequency('私', 'ja'))"
+> ```
 
-```bash
-pip install "wordfreq[cjk]"
+## 🔌 API Endpoints
+
+### `POST /api/lookup`
+
+Dictionary lookup with LLM translation. Returns a `text/event-stream` with events in this order:
+
+1. `progress` (`stage=augment`)
+2. `sources`
+3. `progress` (`stage=generate`)
+4. `result`
+
+When local dictionary data is available, lookup augmentation includes matching `zh/ja` entries in this format:
+
+```text
+surface [reading]
+meaning
 ```
-
-Without the `cjk` extras, Japanese frequency lookups can fail at build time.
-
-On Windows, `wordfreq[cjk]` pulls in `mecab-python3` for Japanese tokenization. The upstream `mecab-python3` wheels also require the Microsoft Visual C++ Redistributable, so a successful `pip install` is not sufficient by itself. Verify the runtime with:
-
-```bash
-python -c "from wordfreq import zipf_frequency; print(zipf_frequency('私', 'ja'))"
-```
-
-## Source data and licenses
-
-- `CC-CEDICT`
-  - download source: `https://cc-cedict.org/editor/editor_export_cedict.php?c=gz`
-  - license: `CC BY-SA 4.0`
-  - page: `https://cc-cedict.org/wiki/`
-
-- `JMdict`
-  - download source: `ftp://ftp.edrdg.org/pub/Nihongo/JMdict_e.gz`
-  - license: `CC BY-SA 4.0`
-  - page: `https://www.edrdg.org/edrdg/licence.html`
-
-- `CMUdict`
-  - download source: `https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict`
-  - license: `BSD-2-Clause`
-  - page: `https://github.com/cmusphinx/cmudict`
-
-- `wordfreq`
-  - download source: `https://pypi.org/project/wordfreq/`
-  - license: `Apache-2.0`
-  - page: `https://github.com/rspeer/wordfreq/`
-
-## Running the backend
-
-Example on bash, from the repo root:
-
-```bash
-export API_KEY="your_api_key"
-export BASE_URL="https://api.hyperbolic.xyz/v1/"
-export RATE_LIMIT="60"
-python apps/api/app.py
-```
-
-If you want to use a different local autocomplete file path:
-
-```bash
-export LOCAL_LEXICON_PATH="/absolute/path/to/lexicon.json.xz"
-python apps/api/app.py
-```
-
-## Autocomplete endpoints
 
 ### `POST /api/autocomplete/local`
 
-Request body:
+Local dictionary autocomplete (no LLM call).
 
+**Request:**
 ```json
 {
   "partialInput": "oyasu",
@@ -130,8 +136,7 @@ Request body:
 }
 ```
 
-Response type:
-
+**Response:**
 ```json
 {
   "suggestions": [
@@ -142,8 +147,9 @@ Response type:
 
 ### `POST /api/autocomplete/llm`
 
-Request body:
+LLM-powered autocomplete suggestions.
 
+**Request:**
 ```json
 {
   "partialInput": "oyasu",
@@ -152,42 +158,9 @@ Request body:
 }
 ```
 
-Response type:
-
+**Response:**
 ```json
 {
   "suggestions": ["おやすみ", "おやす", "おやすみなさい"]
 }
 ```
-
-### `POST /api/lookup`
-
-Response type:
-
-```text
-text/event-stream
-```
-
-Event order:
-
-1. `progress` with `stage=augment`
-2. `sources`
-3. `progress` with `stage=generate`
-4. `result`
-
-Lookup augmentation now also includes the local `zh/ja` dictionary entries when available. The local snippet format is:
-
-```text
-surface [reading]
-meaning
-```
-
-## Frontend config
-
-`apps/web/public/config.json` still controls:
-
-- `BACKEND_URL`
-- `MODELS`
-- `FAST_MODEL`
-
-`FAST_MODEL` is only used by backend autocomplete. The frontend no longer sends a `model` field for autocomplete requests.

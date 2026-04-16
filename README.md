@@ -4,94 +4,87 @@
     </a>
 </div>
 
-# Tri-Lingual Dictionary Remastered (TL;DR)
+# TL;DR — Tri-Lingual Dictionary Remastered
 
-An application that translates words between Chinese, English, and Japanese. It is designed to be useful for multi-language learners, including features like pronunciation, fuzzy search, history, random sentence generation, and vocabulary quizzes.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> Who needs a traditional dictionary when you have a Large Language Model? In the year of 2025, many translation apps have turned into LLM-powered applications. However, some of them will charge you subscription fees or limit your usage. At the same time, using chatbots directly --- like ChatGPT or Gemini --- is very heavy, and chatbots do not always provide desired information in a single response unless you carefully craft your prompts.
->
-> Of course, this project is also vibe coded by [Gemini 3.0 Pro](https://aistudio.google.com/apps).
+A free, open-source dictionary that translates words between **Chinese**, **English**, and **Japanese** — powered by the LLM of your choice.
 
-This project aims to provide a free and open-source alternative for tri-lingual dictionary needs --- at the cost of using your own LLM API key, which should be inexpensive nowadays.
+> 🌐 **[Try the live demo](https://anon.fstqwq.pw/)**
 
-You can try the demo [here](http://anon.fstqwq.pw/). Please be gentle, as my wallet is crying.
+Many translation apps have turned into LLM-powered services with subscription fees or usage limits. Using chatbots directly is heavy and requires careful prompting. TL;DR gives you a clean dictionary interface backed by any OpenAI-compatible LLM API — at the cost of your own API key, which should be inexpensive nowadays.
 
 ## Features
-*   **Auto-Correction:** Empowered by LLM, it suggests corrections for misspelled words.
-*   **Pronunciation:** Browser native TTS (Text-To-Speech).
-*   **History:** Saves recent searches to LocalStorage.
-*   **"I'm Feeling Lucky":** Random sentence generation based on recent searches.
-*   **Pop Quiz:** Memorize vocabulary with spaced repetition quizzes like Anki.
 
-## Known Issues
+- 🔍 **Smart Lookup** — Translates between Chinese, English, and Japanese with LLM-powered auto-correction for misspelled words.
+- 🗣️ **Pronunciation** — Built-in text-to-speech using your browser's native TTS engine.
+- 🕒 **Search History** — Recent searches are saved locally in your browser.
+- 🎲 **"I'm Feeling Lucky"** — Generates a random sentence based on your recent searches.
+- 📝 **Pop Quiz** — Memorize vocabulary with spaced repetition quizzes, inspired by Anki.
+- ⚡ **Local Autocomplete** — Optional offline dictionary index for instant suggestions (no LLM round-trip needed).
 
-*   The pronunciation feature for certain languages may not work on some platforms, for example, Chinese Android devices like Xiaomi will not support Japanese TTS. To fix this, you may consider installing Google TTS (Speech Recognition & Synthesis) from Play Store.
-*   The LLM may not return correct results, especially the pronunciations for words with multiple readings in Chinese and Japanese. The system TTS may also mispronounce some words.
+## Quick Start
 
-## Deployment
+### Prerequisites
 
-### Repository Structure
+- [Node.js](https://nodejs.org/) (for building the frontend)
+- [Python 3](https://www.python.org/) (for the backend)
+- An API key from any OpenAI-compatible LLM provider
 
-- Frontend: `apps/web`
-- Backend: `apps/api`
+### 1. Clone & Install
 
-### Frontend Setup
+```bash
+git clone https://github.com/fstqwq/TL-DR.git
+cd TL-DR
+cd apps/web && npm install && cd ../..
+pip install -r apps/api/requirements.txt
+```
 
-Create `apps/web/public/config.json` based on `apps/web/config_example.json`.
-*   **BACKEND_URL**: The URL of the backend API. For local usage, this should be `http://127.0.0.1:5000`.
-*   **MODELS**: A list of available LLM models.
+### 2. Configure
 
-Then, run the following command to build the frontend:
+**Frontend** — Copy the example config and edit it:
+
+```bash
+cp apps/web/config_example.json apps/web/public/config.json
+```
+
+Set `BACKEND_URL` to `http://127.0.0.1:5000` for local use, and adjust the `MODELS` list to match the models you have access to.
+
+**Backend** — Edit `apps/api/config.json` to add your LLM provider(s). Each provider needs a `base_url` and the *name* of an environment variable that holds your API key (not the key itself). See [apps/api/README.md](apps/api/README.md) for the full config reference.
+
+### 3. Run
+
+```bash
+# Terminal 1 — Backend
+API_KEY=your_api_key_here python apps/api/app.py
+
+# Terminal 2 — Frontend (dev mode)
+npm run dev
+```
+
+The frontend dev server will print a local URL (usually `http://localhost:3000`). Open it in your browser and start searching!
+
+### Building for Production
+
 ```bash
 npm run build
 ```
-Or directly:
-```bash
-npm --prefix apps/web run build
-```
-Place the contents of `apps/web/dist` on your web server.
 
-### Backend Setup
+The output in `apps/web/dist` can be served by any static file server (Nginx, Caddy, etc.). For public deployments, consider placing the backend behind a reverse proxy — see [apps/api/README.md](apps/api/README.md) for details.
 
-1.  **Install Python requirements:**
-    ```bash
-    pip install -r apps/api/requirements.txt
-    ```
+## Known Issues
 
-2.  **Run the Backend Server:**
-    ```bash
-    API_KEY=your_api_key_here BASE_URL=https://api.your-llm-provider.com/ RATE_LIMIT=60 python apps/api/app.py
-    ```
-    *You should see "Running on http://127.0.0.1:5000"*
+- **TTS on some Android devices** — Chinese Android devices (e.g. Xiaomi) may not support Japanese TTS. Installing [Google TTS](https://play.google.com/store/apps/details?id=com.google.android.tts) from Play Store can fix this.
+- **LLM accuracy** — The LLM may return incorrect results, especially pronunciations for words with multiple readings in Chinese and Japanese.
 
-3.  **Optional local autocomplete index:**
-    The backend can serve local and LLM autocomplete through separate JSON endpoints. It looks for a generated local autocomplete file at:
-    - default path: `apps/api/data/lexicon.json.xz`
-    - override env var: `LOCAL_LEXICON_PATH` (preferred) or `AUTOCOMPLETE_INDEX_PATH` (compat)
+## License
 
-    This generated file is intentionally not committed to git. If the file is missing, `/api/autocomplete/local` still works, but it returns an empty suggestion list.
+[MIT](LICENSE) for code.
 
-    Build it with:
-    ```bash
-    pip install -r apps/api/requirements-build.txt
-    python apps/api/scripts/build_autocomplete_index.py
-    ```
+## Acknowledgments
 
-    The generated artifact is `JSON+xz`. Each entry stores:
-    - `surface`
-    - `reading`
-    - `lang`
-    - `meaning`
-    - alias groups
+This project uses the following open data sources for its local dictionary by default:
 
-    The backend rebuilds the in-memory alias index at startup. Local `zh/ja` dictionary entries are also used as `/api/lookup` augmentation sources.
-
-    See [apps/api/README.md](apps/api/README.md) for:
-    - where the source datasets and generated file should live
-    - the single build command that downloads missing source lexicons and writes the generated file
-    - how to point the backend at it
-    - what the autocomplete JSON responses look like
-    - the upstream dataset sources and licence notes for the local autocomplete build
-
-4. **For public usage:**
-    If you decide to deploy the backend server for public usage, consider modifying the authentication logic in `app.py` and use a WSGI server like Gunicorn. At least, you should not expose it directly without a reverse proxy like Nginx.
+- [CC-CEDICT](https://cc-cedict.org/wiki/) (CC BY-SA 4.0) — Chinese-English dictionary
+- [JMdict](https://www.edrdg.org/edrdg/licence.html) (CC BY-SA 4.0) — Japanese-English dictionary
+- [CMUdict](https://github.com/cmusphinx/cmudict) (BSD-2-Clause) — English pronunciation dictionary

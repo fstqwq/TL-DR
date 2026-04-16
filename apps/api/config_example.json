@@ -1,0 +1,32 @@
+{
+  "models": [
+    {
+      "id": "https://clarifai.com/openai/chat-completion/models/gpt-oss-120b/versions/770a9a1af221402dac8977b0186f4604",
+      "name": "GPT OSS 120B (Clarifai)"
+    },
+    {
+      "id": "deepseek-ai/DeepSeek-V3-0324",
+      "name": "DeepSeek V3 0324"
+    },
+    {
+      "id": "meta-llama/Llama-3.3-70B-Instruct",
+      "name": "Llama 3.3 70B Instruct"
+    }
+  ],
+  "fast_model": "deepseek-ai/DeepSeek-V3-0324",
+  "model_providers": {
+    "https://clarifai.com/openai/chat-completion/models/gpt-oss-120b/versions/770a9a1af221402dac8977b0186f4604": "clarifai",
+    "deepseek-ai/DeepSeek-V3-0324": "default",
+    "meta-llama/Llama-3.3-70B-Instruct": "default"
+  },
+  "providers": {
+    "clarifai": {
+      "base_url": "https://api.clarifai.com/v2/ext/openai/v1",
+      "api_key": "CLARIFAI_API_KEY"
+    },
+    "default": {
+      "base_url": "https://api.hyperbolic.xyz/v1/",
+      "api_key": "API_KEY"
+    }
+  }
+}

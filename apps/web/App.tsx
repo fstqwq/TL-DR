@@ -175,14 +175,12 @@ const getAutocompleteScore = (sourceQuery: string | null, currentQuery: string) 
 
 // Default fallback models in case config is broken
 const DEFAULT_MODELS = [
-    { "id": "Qwen/Qwen3-Next-80B-A3B-Instruct", "name": "Qwen3 Next 80BA3B Instruct" },
-    { "id": "Qwen/Qwen3-Next-80B-A3B-Thinking", "name": "Qwen3 Next 80BA3B Thinking" },
-    { "id": "meta-llama/Llama-3.3-70B-Instruct", "name": "Llama 3.3 70B (FP8)" },
-    { "id": "openai/gpt-oss-120b", "name": "GPT OSS 120B" },
-    { "id": "openai/gpt-oss-20b", "name": "GPT OSS 20B" },
-    { "id": "meta-llama/Meta-Llama-3.1-8B-Instruct", "name": "Llama 3.1 8B (FP8)" },
-    { "id": "Qwen/Qwen3-235B-A22B", "name": "Qwen 3 235B A22B (FP8)" },
-    { "id": "deepseek-ai/DeepSeek-V3", "name": "DeepSeek V3 (FP8)" }
+    {
+      "id": "https://clarifai.com/openai/chat-completion/models/gpt-oss-120b/versions/770a9a1af221402dac8977b0186f4604",
+      "name": "GPT OSS 120B (Clarifai)"
+    },
+    { "id": "deepseek-ai/DeepSeek-V3-0324", "name": "DeepSeek V3 0324" },
+    { "id": "meta-llama/Llama-3.3-70B-Instruct", "name": "Llama 3.3 70B Instruct" }
 ];
 
 // Load models from Runtime Config

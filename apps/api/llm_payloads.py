@@ -14,7 +14,7 @@ DICTIONARY_SCHEMA = {
             "description": "The detected source language of the query.",
         },
         "origin": {
-            "type": "string",
+            "type": ["string", "null"],
             "description": "If the target word is a Japanese Katakana loanword (Gairaigo), provide the original Western word (e.g. '(English) Television' for 'テレビ'). Otherwise return null.",
         },
         "definitions": {

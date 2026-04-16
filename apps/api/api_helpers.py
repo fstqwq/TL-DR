@@ -31,6 +31,16 @@ def create_openai_client(api_key: str, base_url: str) -> AsyncOpenAI:
     return AsyncOpenAI(api_key=api_key, base_url=base_url)
 
 
+def create_openai_clients(provider_configs: dict[str, dict[str, str]]) -> dict[str, AsyncOpenAI]:
+    return {
+        provider_name: create_openai_client(
+            provider_config["api_key"],
+            provider_config["base_url"],
+        )
+        for provider_name, provider_config in provider_configs.items()
+    }
+
+
 def heal_json_text(text: str) -> str:
     if not isinstance(text, str):
         return "{}"

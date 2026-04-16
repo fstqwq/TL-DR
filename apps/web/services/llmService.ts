@@ -16,6 +16,13 @@ const getApiBaseUrl = () => {
 const toStringValue = (value: unknown, fallback = ""): string =>
   typeof value === "string" ? value : fallback;
 
+const normalizeOptionalOrigin = (value: unknown): string => {
+  const normalized = toStringValue(value).trim();
+  if (!normalized) return "";
+  const lowered = normalized.toLowerCase();
+  return lowered === "null" || lowered === "none" || lowered === "nil" ? "" : normalized;
+};
+
 const toLanguage = (value: unknown): DictionaryData["detectedLanguage"] => {
   if (value === "zh" || value === "en" || value === "ja" || value === "unknown") return value;
   return "unknown";
@@ -34,7 +41,7 @@ const normalizeDictionaryData = (raw: unknown, query: string): DictionaryData =>
     : {}) as Record<string, unknown>;
 
   const targetWord = toStringValue(data.targetWord, query).trim() || query;
-  const originRaw = toStringValue(data.origin).trim();
+  const originRaw = normalizeOptionalOrigin(data.origin);
   const exampleRaw = (data.exampleSentence && typeof data.exampleSentence === "object"
     ? data.exampleSentence
     : null) as Record<string, unknown> | null;

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -7,7 +8,7 @@ from flask_cors import CORS
 
 try:
     from .api_helpers import (
-        create_openai_client,
+        create_openai_clients,
         lookupdictionary_bundle,
         parse_autocomplete_suggestions,
         safe_json,
@@ -16,23 +17,25 @@ try:
     from .limiter_setup import attach_global_limiter
     from .llm_payloads import (
         AUTOCOMPLETE_PROMPT,
+        DICTIONARY_SCHEMA,
+        LUCKY_SCHEMA,
         lucky_system_content,
         lookup_system_content,
         lookup_user_content,
     )
     from .runtime_config import (
-        API_KEY,
         AUTOCOMPLETE_RATE_LIMIT_PER_MINUTE,
         FAST_MODEL,
         AUTOCOMPLETE_INDEX_PATH,
-        BASE_URL,
         MAIN_RATE_LIMIT_PER_MINUTE,
+        MODEL_PROVIDERS,
         MODELS,
+        PROVIDER_CONFIGS,
         RATE_LIMIT_STORAGE_URI,
     )
 except ImportError:
     from api_helpers import (
-        create_openai_client,
+        create_openai_clients,
         lookupdictionary_bundle,
         parse_autocomplete_suggestions,
         safe_json,
@@ -41,22 +44,22 @@ except ImportError:
     from limiter_setup import attach_global_limiter
     from llm_payloads import (
         AUTOCOMPLETE_PROMPT,
+        DICTIONARY_SCHEMA,
+        LUCKY_SCHEMA,
         lucky_system_content,
         lookup_system_content,
         lookup_user_content,
     )
     from runtime_config import (
-        API_KEY,
         AUTOCOMPLETE_RATE_LIMIT_PER_MINUTE,
         FAST_MODEL,
         AUTOCOMPLETE_INDEX_PATH,
-        BASE_URL,
         MAIN_RATE_LIMIT_PER_MINUTE,
+        MODEL_PROVIDERS,
         MODELS,
+        PROVIDER_CONFIGS,
         RATE_LIMIT_STORAGE_URI,
     )
-
-import logging
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,13 +76,57 @@ main_limit, autocomplete_limit = attach_global_limiter(
     main_limit_per_minute=MAIN_RATE_LIMIT_PER_MINUTE,
     autocomplete_limit_per_minute=AUTOCOMPLETE_RATE_LIMIT_PER_MINUTE,
 )
-assert API_KEY, "API_KEY must be set."
-OPENAI_CLIENT = create_openai_client(API_KEY, BASE_URL)
+PROVIDER_CLIENTS = create_openai_clients(PROVIDER_CONFIGS)
 LOCAL_AUTOCOMPLETE = LocalAutocomplete(AUTOCOMPLETE_INDEX_PATH)
 
 
 def _sse_event(name: str, payload: object) -> str:
     return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _client_for_model(model: str):
+    provider_name = MODEL_PROVIDERS.get(model)
+    if provider_name is None:
+        raise RuntimeError(f"No provider configured for model '{model}'.")
+
+    client = PROVIDER_CLIENTS.get(provider_name)
+    if client is None:
+        raise RuntimeError(f"Provider '{provider_name}' is not initialized.")
+    return client
+
+
+def _provider_for_model(model: str) -> str:
+    provider_name = MODEL_PROVIDERS.get(model)
+    if provider_name is None:
+        raise RuntimeError(f"No provider configured for model '{model}'.")
+    return provider_name
+
+
+def _lookup_response_format(model: str) -> dict | None:
+    # Clarifai's OpenAI-compatible endpoint currently rejects response_format=json_schema
+    # even when the schema is present. Falling back to prompt-constrained JSON keeps
+    # the model usable without changing other providers.
+    if _provider_for_model(model) == "clarifai":
+        return None
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "dictionary_entry",
+            "schema": DICTIONARY_SCHEMA,
+        },
+    }
+
+
+def _lucky_response_format(model: str) -> dict | None:
+    if _provider_for_model(model) == "clarifai":
+        return None
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "lucky_sentence",
+            "schema": LUCKY_SCHEMA,
+        },
+    }
 
 
 def _parse_autocomplete_request():
@@ -118,20 +165,23 @@ def lookup_word():
         logging.warning("lookup_unsupported_model model=%s", model)
         return jsonify({"error": f"Model '{model}' not supported."}), 400
 
-    client = OPENAI_CLIENT
+    client = _client_for_model(model)
 
     @stream_with_context
     def generate():
         async def fetch_lookup_result() -> object:
-            return await client.chat.completions.create(
-                model=model,
-                messages=[
+            request_kwargs = {
+                "model": model,
+                "messages": [
                     {"role": "system", "content": lookup_system_content()},
                     {"role": "user", "content": lookup_user_content(query, preferred_language, augmented_content)},
                 ],
-                temperature=0.1,
-                response_format={"type": "json_schema"},
-            )
+                "temperature": 0.1,
+            }
+            response_format = _lookup_response_format(model)
+            if response_format is not None:
+                request_kwargs["response_format"] = response_format
+            return await client.chat.completions.create(**request_kwargs)
 
         try:
             yield _sse_event(
@@ -223,7 +273,7 @@ def autocomplete_llm():
     if not partial_input:
         return jsonify({"suggestions": []})
 
-    client = OPENAI_CLIENT
+    client = _client_for_model(FAST_MODEL)
 
     async def fetch_api_suggestions() -> list[str]:
         response = await client.chat.completions.create(
@@ -259,18 +309,25 @@ def generate_sentence():
 
     if not words or len(words) < 2:
         return jsonify({"error": "Not enough words provided."}), 400
+    if model not in MODELS:
+        logging.warning("generate_sentence_unsupported_model model=%s", model)
+        return jsonify({"error": f"Model '{model}' not supported."}), 400
 
     try:
-        client = OPENAI_CLIENT
+        client = _client_for_model(model)
+
         async def fetch_sentence_result() -> object:
-            return await client.chat.completions.create(
-                model=model,
-                messages=[
+            request_kwargs = {
+                "model": model,
+                "messages": [
                     {"role": "system", "content": lucky_system_content()},
                     {"role": "user", "content": f"Input Words: {json.dumps(words, ensure_ascii=False, indent=None)}"},
                 ],
-                response_format={"type": "json_schema"},
-            )
+            }
+            response_format = _lucky_response_format(model)
+            if response_format is not None:
+                request_kwargs["response_format"] = response_format
+            return await client.chat.completions.create(**request_kwargs)
 
         response = asyncio.run(fetch_sentence_result())
 

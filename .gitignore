@@ -14,6 +14,7 @@ dist-ssr
 package-lock.json
 public/config.json
 apps/web/public/config.json
+apps/api/config.json
 *.zip
 
 # Editor directories and files
