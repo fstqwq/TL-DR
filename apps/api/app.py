@@ -81,6 +81,7 @@ main_limit, autocomplete_limit = attach_global_limiter(
 )
 PROVIDER_CLIENTS = create_openai_clients(PROVIDER_CONFIGS)
 LOCAL_AUTOCOMPLETE = LocalAutocomplete(AUTOCOMPLETE_INDEX_PATH)
+MAX_AUTOCOMPLETE_INPUT_LENGTH = 128
 
 
 def _sse_event(name: str, payload: object) -> str:
@@ -277,6 +278,8 @@ def autocomplete_local():
 
     if not partial_input:
         return jsonify({"suggestions": []})
+    if len(partial_input) > MAX_AUTOCOMPLETE_INPUT_LENGTH:
+        return jsonify({"suggestions": []}), 400
 
     try:
         suggestions = LOCAL_AUTOCOMPLETE.search(
@@ -338,7 +341,7 @@ def autocomplete_llm():
 @app.route("/api/generate-sentence", methods=["POST"])
 @main_limit
 def generate_sentence():
-    data = request.json
+    data = request.json or {}
     timestamp = data.get("timestamp", 0)
     if abs(time.time() - timestamp / 1000) > 15:
         return jsonify({"error": "Invalid request."}), 403

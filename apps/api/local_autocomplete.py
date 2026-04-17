@@ -291,11 +291,14 @@ LATIN_TYPO_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 TYPO_VARIANT_LIMIT = 512
 TYPO_ROW_LIMIT = 64
 COVERAGE_BONUS_MAX = 12.0
+MAX_TYPO_NEIGHBOR_INPUT_LENGTH = 128
 
 
 def typo_neighbors(text: str, limit: int = TYPO_VARIANT_LIMIT) -> list[tuple[str, float]]:
     normalized = normalize_query(text)
     if not normalized or detect_script(normalized) != "latin":
+        return []
+    if len(normalized) > MAX_TYPO_NEIGHBOR_INPUT_LENGTH:
         return []
 
     variants: list[tuple[str, float]] = []

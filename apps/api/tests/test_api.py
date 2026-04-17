@@ -461,6 +461,19 @@ class ApiEndpointsTestCase(unittest.TestCase):
         self.assertNotIn("response_format", kwargs)
         self.assertNotIn("max_completion_tokens", kwargs)
 
+    def test_autocomplete_rejects_overly_long_partial_input(self):
+        response = self.client.post(
+            "/api/autocomplete/local",
+            json={
+                "partialInput": "a" * 129,
+                "preferredLanguage": "en",
+                "timestamp": int(time.time() * 1000),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json(), {"suggestions": []})
+
     def test_generate_sentence_requires_two_words(self):
         response = self.client.post(
             "/api/generate-sentence",
@@ -488,7 +501,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         self.assertEqual(response.get_json(), {"error": "Model 'unknown-model' not supported."})
 
     def test_generate_sentence_applies_model_params_and_expands_json_schema(self):
-        fake_create = AsyncMock(return_value=make_chat_response('{"usedWords":["apple"],"content":{"zh":{"text":"苹果","pronunciation":"píng guǒ"},"en":{"text":"apple","pronunciation":"/ˈæp.əl/"},"ja":{"text":"りんご","pronunciation":"りんご"}}}'))
+        fake_create = AsyncMock(return_value=make_chat_response('{"usedWords":["apple"],"content":{"zh":{"text":"??","pronunciation":"p?ng gu?"},"en":{"text":"apple","pronunciation":"/??p.?l/"},"ja":{"text":"???","pronunciation":"???"}}}'))
         fake_client = make_fake_client(fake_create)
         model_id = "deepseek-ai/DeepSeek-V3-0324"
 
