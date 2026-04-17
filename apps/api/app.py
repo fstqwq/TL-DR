@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import logging
 import time
@@ -28,6 +29,7 @@ try:
         FAST_MODEL,
         AUTOCOMPLETE_INDEX_PATH,
         MAIN_RATE_LIMIT_PER_MINUTE,
+        MODEL_PARAMS,
         MODEL_PROVIDERS,
         MODELS,
         PROVIDER_CONFIGS,
@@ -55,6 +57,7 @@ except ImportError:
         FAST_MODEL,
         AUTOCOMPLETE_INDEX_PATH,
         MAIN_RATE_LIMIT_PER_MINUTE,
+        MODEL_PARAMS,
         MODEL_PROVIDERS,
         MODELS,
         PROVIDER_CONFIGS,
@@ -102,31 +105,66 @@ def _provider_for_model(model: str) -> str:
     return provider_name
 
 
-def _lookup_response_format(model: str) -> dict | None:
+def _schema_for_endpoint(endpoint: str) -> tuple[str, dict] | None:
+    if endpoint == "lookup":
+        return "dictionary_entry", DICTIONARY_SCHEMA
+    if endpoint == "generate_sentence":
+        return "lucky_sentence", LUCKY_SCHEMA
+    return None
+
+
+def _normalize_response_format(model: str, endpoint: str, response_format: object) -> dict | None:
+    if not isinstance(response_format, dict) or not response_format:
+        return None
+
+    response_type = response_format.get("type")
+    if response_type != "json_schema":
+        return copy.deepcopy(response_format)
+
     # Clarifai's OpenAI-compatible endpoint currently rejects response_format=json_schema
     # even when the schema is present. Falling back to prompt-constrained JSON keeps
     # the model usable without changing other providers.
     if _provider_for_model(model) == "clarifai":
         return None
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": "dictionary_entry",
-            "schema": DICTIONARY_SCHEMA,
-        },
-    }
 
-
-def _lucky_response_format(model: str) -> dict | None:
-    if _provider_for_model(model) == "clarifai":
+    schema_ref = _schema_for_endpoint(endpoint)
+    if schema_ref is None:
         return None
+
+    schema_name, schema = schema_ref
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": "lucky_sentence",
-            "schema": LUCKY_SCHEMA,
+            "name": schema_name,
+            "schema": schema,
         },
     }
+
+
+def _model_request_params(model: str, endpoint: str, *, include_response_format: bool = True) -> dict:
+    params = copy.deepcopy(MODEL_PARAMS.get(model, {}))
+
+    if include_response_format:
+        if "response_format" in params:
+            raw_response_format = params.get("response_format")
+        elif endpoint in {"lookup", "generate_sentence"}:
+            raw_response_format = {"type": "json_schema"}
+        else:
+            raw_response_format = None
+        normalized_response_format = _normalize_response_format(model, endpoint, raw_response_format)
+        if normalized_response_format is None:
+            params.pop("response_format", None)
+        else:
+            params["response_format"] = normalized_response_format
+    else:
+        params.pop("response_format", None)
+
+    if endpoint == "autocomplete":
+        params.pop("temperature", None)
+        params.pop("max_tokens", None)
+        params.pop("max_completion_tokens", None)
+
+    return params
 
 
 def _parse_autocomplete_request():
@@ -176,11 +214,9 @@ def lookup_word():
                     {"role": "system", "content": lookup_system_content()},
                     {"role": "user", "content": lookup_user_content(query, preferred_language, augmented_content)},
                 ],
-                "temperature": 0.1,
             }
-            response_format = _lookup_response_format(model)
-            if response_format is not None:
-                request_kwargs["response_format"] = response_format
+            request_kwargs.update(_model_request_params(model, "lookup"))
+            request_kwargs["temperature"] = 0.1
             return await client.chat.completions.create(**request_kwargs)
 
         try:
@@ -276,15 +312,17 @@ def autocomplete_llm():
     client = _client_for_model(FAST_MODEL)
 
     async def fetch_api_suggestions() -> list[str]:
-        response = await client.chat.completions.create(
-            model=FAST_MODEL,
-            messages=[
+        request_kwargs = {
+            "model": FAST_MODEL,
+            "messages": [
                 {"role": "system", "content": AUTOCOMPLETE_PROMPT},
                 {"role": "user", "content": _autocomplete_user_content(preferred_language, partial_input)},
             ],
-            temperature=0,
-            max_tokens=32,
-        )
+        }
+        request_kwargs.update(_model_request_params(FAST_MODEL, "autocomplete", include_response_format=False))
+        request_kwargs["temperature"] = 0
+        request_kwargs["max_tokens"] = 32
+        response = await client.chat.completions.create(**request_kwargs)
         content = response.choices[0].message.content or ""
         return parse_autocomplete_suggestions(content)
 
@@ -324,9 +362,7 @@ def generate_sentence():
                     {"role": "user", "content": f"Input Words: {json.dumps(words, ensure_ascii=False, indent=None)}"},
                 ],
             }
-            response_format = _lucky_response_format(model)
-            if response_format is not None:
-                request_kwargs["response_format"] = response_format
+            request_kwargs.update(_model_request_params(model, "generate_sentence"))
             return await client.chat.completions.create(**request_kwargs)
 
         response = asyncio.run(fetch_sentence_result())

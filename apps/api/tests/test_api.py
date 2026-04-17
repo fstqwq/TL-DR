@@ -131,6 +131,106 @@ class ApiEndpointsTestCase(unittest.TestCase):
         self.assertEqual(fake_create.call_count, 1)
         client_selector.assert_called_once_with(self.model_id)
 
+    def test_lookup_applies_model_params_and_expands_json_schema(self):
+        fake_create = AsyncMock(return_value=make_chat_response('{"targetWord":"apple"}'))
+        fake_client = make_fake_client(fake_create)
+        model_id = "deepseek-ai/DeepSeek-V3-0324"
+
+        with (
+            patch.object(api_app, "_client_for_model", return_value=fake_client),
+            patch.object(
+                api_app,
+                "lookupdictionary_bundle",
+                return_value={"augmented_content": "", "sources": []},
+            ),
+            patch.dict(
+                api_app.MODEL_PARAMS,
+                {model_id: {"reasoning_effort": "low", "response_format": {"type": "json_schema"}}},
+                clear=False,
+            ),
+        ):
+            response = self.client.post(
+                "/api/lookup",
+                json={
+                    "query": "apple",
+                    "preferredLanguage": "en",
+                    "model": model_id,
+                    "timestamp": int(time.time() * 1000),
+                },
+                buffered=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = fake_create.call_args
+        self.assertEqual(kwargs["reasoning_effort"], "low")
+        self.assertEqual(kwargs["temperature"], 0.1)
+        self.assertEqual(kwargs["response_format"]["type"], "json_schema")
+        self.assertEqual(kwargs["response_format"]["json_schema"]["name"], "dictionary_entry")
+        self.assertEqual(kwargs["response_format"]["json_schema"]["schema"], api_app.DICTIONARY_SCHEMA)
+
+    def test_lookup_drops_json_schema_for_clarifai_models(self):
+        fake_create = AsyncMock(return_value=make_chat_response('{"targetWord":"apple"}'))
+        fake_client = make_fake_client(fake_create)
+        model_id = "https://clarifai.com/openai/chat-completion/models/gpt-oss-120b/versions/770a9a1af221402dac8977b0186f4604"
+
+        with (
+            patch.object(api_app, "_client_for_model", return_value=fake_client),
+            patch.object(
+                api_app,
+                "lookupdictionary_bundle",
+                return_value={"augmented_content": "", "sources": []},
+            ),
+            patch.dict(
+                api_app.MODEL_PARAMS,
+                {model_id: {"response_format": {"type": "json_schema"}}},
+                clear=False,
+            ),
+        ):
+            response = self.client.post(
+                "/api/lookup",
+                json={
+                    "query": "apple",
+                    "preferredLanguage": "en",
+                    "model": model_id,
+                    "timestamp": int(time.time() * 1000),
+                },
+                buffered=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = fake_create.call_args
+        self.assertNotIn("response_format", kwargs)
+
+    def test_lookup_defaults_to_json_schema_for_non_clarifai_models(self):
+        fake_create = AsyncMock(return_value=make_chat_response('{"targetWord":"apple"}'))
+        fake_client = make_fake_client(fake_create)
+        model_id = "deepseek-ai/DeepSeek-V3-0324"
+
+        with (
+            patch.object(api_app, "_client_for_model", return_value=fake_client),
+            patch.object(
+                api_app,
+                "lookupdictionary_bundle",
+                return_value={"augmented_content": "", "sources": []},
+            ),
+            patch.dict(api_app.MODEL_PARAMS, {model_id: {}}, clear=False),
+        ):
+            response = self.client.post(
+                "/api/lookup",
+                json={
+                    "query": "apple",
+                    "preferredLanguage": "en",
+                    "model": model_id,
+                    "timestamp": int(time.time() * 1000),
+                },
+                buffered=True,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = fake_create.call_args
+        self.assertEqual(kwargs["response_format"]["type"], "json_schema")
+        self.assertEqual(kwargs["response_format"]["json_schema"]["name"], "dictionary_entry")
+
     def test_lookup_handles_unicode_llm_content_without_console_encoding_failure(self):
         fake_create = AsyncMock(return_value=make_chat_response('{"targetWord":"オーケストラレーション"}'))
         fake_client = make_fake_client(fake_create)
@@ -322,6 +422,45 @@ class ApiEndpointsTestCase(unittest.TestCase):
         self.assertIn("Input: meishi", kwargs["messages"][1]["content"])
         client_selector.assert_called_once_with(api_app.FAST_MODEL)
 
+    def test_autocomplete_llm_ignores_response_format_and_fixed_limits_override_model_params(self):
+        fake_create = AsyncMock(return_value=make_chat_response("food"))
+        fake_client = make_fake_client(fake_create)
+
+        with (
+            patch.object(api_app, "_client_for_model", return_value=fake_client),
+            patch.dict(
+                api_app.MODEL_PARAMS,
+                {
+                    api_app.FAST_MODEL: {
+                        "reasoning_effort": "low",
+                        "response_format": {"type": "json_schema"},
+                        "temperature": 0.8,
+                        "max_tokens": 99,
+                        "max_completion_tokens": 128,
+                        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+                    }
+                },
+                clear=False,
+            ),
+        ):
+            response = self.client.post(
+                "/api/autocomplete/llm",
+                json={
+                    "partialInput": "meishi",
+                    "preferredLanguage": "zh",
+                    "timestamp": int(time.time() * 1000),
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = fake_create.call_args
+        self.assertEqual(kwargs["reasoning_effort"], "low")
+        self.assertEqual(kwargs["temperature"], 0)
+        self.assertEqual(kwargs["max_tokens"], 32)
+        self.assertEqual(kwargs["extra_body"], {"chat_template_kwargs": {"enable_thinking": False}})
+        self.assertNotIn("response_format", kwargs)
+        self.assertNotIn("max_completion_tokens", kwargs)
+
     def test_generate_sentence_requires_two_words(self):
         response = self.client.post(
             "/api/generate-sentence",
@@ -347,6 +486,40 @@ class ApiEndpointsTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json(), {"error": "Model 'unknown-model' not supported."})
+
+    def test_generate_sentence_applies_model_params_and_expands_json_schema(self):
+        fake_create = AsyncMock(return_value=make_chat_response('{"usedWords":["apple"],"content":{"zh":{"text":"苹果","pronunciation":"píng guǒ"},"en":{"text":"apple","pronunciation":"/ˈæp.əl/"},"ja":{"text":"りんご","pronunciation":"りんご"}}}'))
+        fake_client = make_fake_client(fake_create)
+        model_id = "deepseek-ai/DeepSeek-V3-0324"
+
+        with (
+            patch.object(api_app, "_client_for_model", return_value=fake_client),
+            patch.dict(
+                api_app.MODEL_PARAMS,
+                {
+                    model_id: {
+                        "reasoning_effort": "low",
+                        "response_format": {"type": "json_schema"},
+                    }
+                },
+                clear=False,
+            ),
+        ):
+            response = self.client.post(
+                "/api/generate-sentence",
+                json={
+                    "words": [{"word": "apple", "lang": "en"}, {"word": "test", "lang": "en"}],
+                    "model": model_id,
+                    "timestamp": int(time.time() * 1000),
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = fake_create.call_args
+        self.assertEqual(kwargs["reasoning_effort"], "low")
+        self.assertEqual(kwargs["response_format"]["type"], "json_schema")
+        self.assertEqual(kwargs["response_format"]["json_schema"]["name"], "lucky_sentence")
+        self.assertEqual(kwargs["response_format"]["json_schema"]["schema"], api_app.LUCKY_SCHEMA)
 
 
 if __name__ == "__main__":

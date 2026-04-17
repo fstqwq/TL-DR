@@ -179,6 +179,10 @@ const DEFAULT_MODELS = [
       "id": "https://clarifai.com/openai/chat-completion/models/gpt-oss-120b/versions/770a9a1af221402dac8977b0186f4604",
       "name": "GPT OSS 120B (Clarifai)"
     },
+    {
+      "id": "https://clarifai.com/qwen/qwen-VL/models/Qwen3_6-35B-A3B-FP8/versions/6e75893f774844af8707b152affc3461",
+      "name": "Qwen 3.6 35B A3B (Clarifai)"
+    },
     { "id": "deepseek-ai/DeepSeek-V3-0324", "name": "DeepSeek V3 0324" },
     { "id": "meta-llama/Llama-3.3-70B-Instruct", "name": "Llama 3.3 70B Instruct" }
 ];

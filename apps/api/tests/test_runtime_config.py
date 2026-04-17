@@ -19,6 +19,86 @@ import runtime_config  # noqa: E402
 
 
 class RuntimeConfigTestCase(unittest.TestCase):
+    def test_load_model_params_returns_validated_params(self):
+        config = {
+            "models": [
+                {
+                    "id": "model-a",
+                    "name": "Model A",
+                    "params": {
+                        "reasoning_effort": "none",
+                        "temperature": 0.2,
+                        "max_completion_tokens": 128,
+                        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+                        "response_format": {"type": "json_schema"},
+                    },
+                }
+            ]
+        }
+
+        result = runtime_config.load_model_params(config)
+
+        self.assertEqual(
+            result,
+            {
+                "model-a": {
+                    "reasoning_effort": "none",
+                    "temperature": 0.2,
+                    "max_completion_tokens": 128,
+                    "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+                    "response_format": {"type": "json_schema"},
+                }
+            },
+        )
+
+    def test_load_model_params_rejects_unknown_param_key(self):
+        config = {
+            "models": [
+                {
+                    "id": "model-a",
+                    "name": "Model A",
+                    "params": {
+                        "thinking": False,
+                    },
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "is not supported"):
+            runtime_config.load_model_params(config)
+
+    def test_load_model_params_rejects_invalid_reasoning_effort(self):
+        config = {
+            "models": [
+                {
+                    "id": "model-a",
+                    "name": "Model A",
+                    "params": {
+                        "reasoning_effort": "minimal",
+                    },
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "must be one of"):
+            runtime_config.load_model_params(config)
+
+    def test_load_model_params_rejects_invalid_response_format(self):
+        config = {
+            "models": [
+                {
+                    "id": "model-a",
+                    "name": "Model A",
+                    "params": {
+                        "response_format": "json_schema",
+                    },
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "must be an object"):
+            runtime_config.load_model_params(config)
+
     def test_load_provider_configs_resolves_env_named_in_api_key_field(self):
         config = {
             "providers": {

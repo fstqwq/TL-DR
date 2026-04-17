@@ -1,6 +1,7 @@
 import json
 import os
-from typing import Dict
+from copy import deepcopy
+from typing import Any, Dict
 
 RATE_LIMIT = float(os.environ.get("RATE_LIMIT", "60"))  # requests per minute
 RATE_LIMIT_STORAGE_URI = os.environ.get("RATE_LIMIT_STORAGE_URI", "memory://")
@@ -15,12 +16,70 @@ AUTOCOMPLETE_INDEX_PATH = os.environ.get(
 )
 MAIN_RATE_LIMIT_PER_MINUTE = max(1, int(round(RATE_LIMIT)))
 AUTOCOMPLETE_RATE_LIMIT_PER_MINUTE = max(1, int(round(RATE_LIMIT * 3)))
+ALLOWED_MODEL_PARAM_KEYS = {
+    "reasoning_effort",
+    "temperature",
+    "max_completion_tokens",
+    "max_tokens",
+    "extra_body",
+    "response_format",
+}
+ALLOWED_REASONING_EFFORTS = {"none", "low", "medium", "high"}
 
 
 def _require_non_empty_string(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RuntimeError(f"Invalid backend config: '{field_name}' must be a non-empty string.")
     return value.strip()
+
+
+def _require_json_object(value: object, field_name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Invalid backend config: '{field_name}' must be an object.")
+    return value
+
+
+def _validate_model_params(params: object, field_name: str) -> dict[str, Any]:
+    if params is None:
+        return {}
+
+    params_obj = _require_json_object(params, field_name)
+    normalized: dict[str, Any] = {}
+    for key, value in params_obj.items():
+        if key not in ALLOWED_MODEL_PARAM_KEYS:
+            raise RuntimeError(
+                f"Invalid backend config: '{field_name}.{key}' is not supported. "
+                f"Allowed keys: {', '.join(sorted(ALLOWED_MODEL_PARAM_KEYS))}."
+            )
+        if key == "reasoning_effort":
+            effort = _require_non_empty_string(value, f"{field_name}.{key}")
+            if effort not in ALLOWED_REASONING_EFFORTS:
+                raise RuntimeError(
+                    f"Invalid backend config: '{field_name}.{key}' must be one of "
+                    f"{', '.join(sorted(ALLOWED_REASONING_EFFORTS))}."
+                )
+            normalized[key] = effort
+            continue
+        if key == "temperature":
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise RuntimeError(f"Invalid backend config: '{field_name}.{key}' must be a number.")
+            normalized[key] = value
+            continue
+        if key in {"max_completion_tokens", "max_tokens"}:
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise RuntimeError(f"Invalid backend config: '{field_name}.{key}' must be a positive integer.")
+            normalized[key] = value
+            continue
+        if key == "extra_body":
+            normalized[key] = deepcopy(_require_json_object(value, f"{field_name}.{key}"))
+            continue
+        if key == "response_format":
+            response_format = deepcopy(_require_json_object(value, f"{field_name}.{key}"))
+            response_type = response_format.get("type")
+            if response_type is not None:
+                _require_non_empty_string(response_type, f"{field_name}.{key}.type")
+            normalized[key] = response_format
+    return normalized
 
 
 def load_backend_config(config_path: str = CONFIG_PATH) -> dict:
@@ -57,6 +116,23 @@ def load_models(config: dict | None = None) -> Dict[str, str]:
             raise RuntimeError(f"Invalid backend config: duplicate model id '{model_id}'.")
         valid_models[model_id] = model_name
     return valid_models
+
+
+def load_model_params(config: dict | None = None) -> dict[str, dict[str, Any]]:
+    config = config or {}
+    models = config.get("models")
+    if not isinstance(models, list) or not models:
+        raise RuntimeError("Invalid backend config: 'models' must be a non-empty list.")
+
+    valid_params: dict[str, dict[str, Any]] = {}
+    for index, model in enumerate(models):
+        if not isinstance(model, dict):
+            raise RuntimeError(f"Invalid backend config: models[{index}] must be an object.")
+        model_id = _require_non_empty_string(model.get("id"), f"models[{index}].id")
+        if model_id in valid_params:
+            raise RuntimeError(f"Invalid backend config: duplicate model id '{model_id}'.")
+        valid_params[model_id] = _validate_model_params(model.get("params"), f"models[{index}].params")
+    return valid_params
 
 
 def load_fast_model(config: dict, models: Dict[str, str]) -> str:
@@ -127,6 +203,7 @@ def load_model_providers(
 
 BACKEND_CONFIG = load_backend_config()
 MODELS = load_models(BACKEND_CONFIG)
+MODEL_PARAMS = load_model_params(BACKEND_CONFIG)
 FAST_MODEL = load_fast_model(BACKEND_CONFIG, MODELS)
 PROVIDER_CONFIGS = load_provider_configs(BACKEND_CONFIG)
 MODEL_PROVIDERS = load_model_providers(BACKEND_CONFIG, MODELS, PROVIDER_CONFIGS, FAST_MODEL)

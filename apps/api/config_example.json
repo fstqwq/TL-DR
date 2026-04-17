@@ -2,7 +2,17 @@
   "models": [
     {
       "id": "https://clarifai.com/openai/chat-completion/models/gpt-oss-120b/versions/770a9a1af221402dac8977b0186f4604",
-      "name": "GPT OSS 120B (Clarifai)"
+      "name": "GPT OSS 120B (Clarifai)",
+      "params": {
+        "reasoning_effort": "low"
+      }
+    },
+    {
+      "id": "https://clarifai.com/qwen/qwen-VL/models/Qwen3_6-35B-A3B-FP8/versions/6e75893f774844af8707b152affc3461",
+      "name": "Qwen 3.6 35B A3B (Clarifai)",
+      "params": {
+        "reasoning_effort": "none"
+      }
     },
     {
       "id": "deepseek-ai/DeepSeek-V3-0324",
@@ -16,6 +26,7 @@
   "fast_model": "deepseek-ai/DeepSeek-V3-0324",
   "model_providers": {
     "https://clarifai.com/openai/chat-completion/models/gpt-oss-120b/versions/770a9a1af221402dac8977b0186f4604": "clarifai",
+    "https://clarifai.com/qwen/qwen-VL/models/Qwen3_6-35B-A3B-FP8/versions/6e75893f774844af8707b152affc3461": "clarifai",
     "deepseek-ai/DeepSeek-V3-0324": "default",
     "meta-llama/Llama-3.3-70B-Instruct": "default"
   },

@@ -15,7 +15,13 @@ The config file shape is:
 ```json
 {
   "models": [
-    { "id": "deepseek-ai/DeepSeek-V3-0324", "name": "DeepSeek V3 0324" }
+    {
+      "id": "deepseek-ai/DeepSeek-V3-0324",
+      "name": "DeepSeek V3 0324",
+      "params": {
+        "reasoning_effort": "low"
+      }
+    }
   ],
   "fast_model": "deepseek-ai/DeepSeek-V3-0324",
   "model_providers": {
@@ -34,6 +40,26 @@ The config file shape is:
 > - `providers.<name>.api_key` is the **name of an environment variable**, not the raw API key.
 > - Every model in `models` must also appear in `model_providers`.
 > - `fast_model` must also appear in `models` and `model_providers`.
+> - `models[*].params` is optional, and is forwarded to the OpenAI-compatible client after backend validation.
+
+### Model Params
+
+Each model may define a `params` object. Supported keys are:
+
+- `reasoning_effort`
+- `temperature`
+- `max_completion_tokens`
+- `max_tokens`
+- `extra_body`
+- `response_format`
+
+Most of these are passed through directly. `response_format` has one special case:
+
+- If `response_format.type == "json_schema"`, the backend injects the correct schema for the current endpoint.
+  - `/api/lookup` -> dictionary schema
+  - `/api/generate-sentence` -> lucky sentence schema
+- `/api/autocomplete/llm` ignores `response_format` even if it is configured on the model.
+- If `response_format` is omitted entirely, `/api/lookup` and `/api/generate-sentence` keep the existing default `json_schema` behavior unless the selected provider compatibility logic disables it.
 
 ### Frontend Config
 
