@@ -16,6 +16,7 @@ export interface LookupSource {
   pageUrl: string;
   fetchUrl: string;
   preview: string;
+  raw?: string;
 }
 
 export interface DictionaryData {

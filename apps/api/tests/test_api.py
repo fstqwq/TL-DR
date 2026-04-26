@@ -103,7 +103,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
                 api_app,
                 "lookupdictionary_bundle",
                 return_value={"augmented_content": "", "sources": fake_sources},
-            ),
+            ) as lookup_bundle_mock,
         ):
             response = self.client.post(
                 "/api/lookup",
@@ -130,6 +130,11 @@ class ApiEndpointsTestCase(unittest.TestCase):
         )
         self.assertEqual(fake_create.call_count, 1)
         client_selector.assert_called_once_with(self.model_id)
+        lookup_bundle_mock.assert_called_once_with(
+            "apple",
+            local_autocomplete=api_app.LOCAL_AUTOCOMPLETE,
+            preferred_language="en",
+        )
 
     def test_lookup_applies_model_params_and_expands_json_schema(self):
         fake_create = AsyncMock(return_value=make_chat_response('{"targetWord":"apple"}'))
@@ -265,7 +270,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
             {"id": "empty", "name": "Empty"},
         )
 
-        async def fake_fetch(spec, word):
+        async def fake_fetch(spec, word, preferred_language="auto"):
             source_id = spec["id"]
             if source_id == "ok":
                 return {
@@ -374,6 +379,129 @@ class ApiEndpointsTestCase(unittest.TestCase):
 
         self.assertIn("/ˈpɹiːvɪəs/", text)
         self.assertNotIn("脌", text)
+
+    def test_wiktionary_formatter_preserves_definition_templates(self):
+        raw = "\n".join(
+            [
+                "==English==",
+                "===Phrase===",
+                "{{head|en|phrase}}",
+                "# {{lb|en|chiefly|Internet slang}} {{alt form|en|tl;dr}}.",
+            ]
+        )
+
+        formatted = api_helpers._format_wiktionary_raw(raw)
+
+        self.assertEqual(
+            formatted,
+            "English · Phrase\n- (chiefly; Internet slang) Alternative form of tl;dr.",
+        )
+        self.assertNotIn("# .", formatted)
+        self.assertNotIn("{{", formatted)
+
+    def test_wiktionary_formatter_keeps_multiple_definition_sections(self):
+        raw = "\n".join(
+            [
+                "==English==",
+                "===Alternative forms===",
+                "* {{alter|en|Angell|q=surname}}",
+                "===Pronunciation===",
+                "* {{IPA|en|/ˈeɪn.d͡ʒəl/}}",
+                "===Noun===",
+                "{{en-proper noun|s}}",
+                "# {{altcase|en|angel}}.",
+                "===Proper noun===",
+                "{{en-proper noun|s}}",
+                "# A male given name from Latin {{m|la|Angelus}}; or an anglicized spelling of {{m|es|Ángel}}.",
+            ]
+        )
+
+        formatted = api_helpers._format_wiktionary_raw(raw, preferred_language="en")
+
+        self.assertEqual(
+            formatted,
+            "\n".join(
+                [
+                    "English · Noun",
+                    "- Alternative letter-case form of angel.",
+                    "English · Proper noun",
+                    "- A male given name from Latin Angelus; or an anglicized spelling of Ángel.",
+                ]
+            ),
+        )
+        self.assertNotIn("Pronunciation", formatted)
+
+    def test_wiktionary_formatter_selects_target_language_definitions(self):
+        raw = "\n".join(
+            [
+                "==Chinese==",
+                "===Pronunciation===",
+                "{{zh-pron|m=tiānshǐ}}",
+                "===Noun===",
+                "{{head|zh|noun}}",
+                "# [[angel]]",
+                "# {{lb|zh|obsolete}} [[envoy]] sent by [[Heaven]] or [[Son of Heaven]]; [[imperial]] or [[heavenly]] [[emissary]]",
+                "==Japanese==",
+                "===Etymology===",
+                "From {{der|ja|ltc|sort=てんし|-}} {{ltc-l|天使}}.",
+                "===Pronunciation===",
+                "{{ja-pron|てんし|acc=1}}",
+                "===Noun===",
+                "{{ja-noun|てんし}}",
+                "# an [[angel]]",
+                "#: {{ja-usex|'''天%使'''と[[悪%魔]]|'''^てん%し''' と ^あく%ま}}",
+                "# an [[imperial]] [[messenger]] or [[envoy]]",
+                "# a [[messenger]] or [[envoy]] from [[heaven]]",
+                "# {{lb|ja|sort=てんし|metaphor}} someone who is [[kind]] and [[pure]]; an [[angel]]",
+                "====Quotations====",
+                "* See [[Citations:天使]].",
+                "==Korean==",
+                "===Noun===",
+                "# {{hanja form of|천사|[[angel]]}}",
+            ]
+        )
+
+        formatted = api_helpers._format_wiktionary_raw(raw, preferred_language="ja")
+
+        self.assertEqual(
+            formatted,
+            "\n".join(
+                [
+                    "Japanese · Noun",
+                    "- an angel",
+                    "- an imperial messenger or envoy",
+                    "- a messenger or envoy from heaven",
+                    "- (metaphor) someone who is kind and pure; an angel",
+                ]
+            ),
+        )
+        self.assertNotIn("Etymology", formatted)
+        self.assertNotIn("Pronunciation", formatted)
+        self.assertNotIn("Korean", formatted)
+        self.assertNotIn("ja-usex", formatted)
+
+        chinese = api_helpers._format_wiktionary_raw(raw, preferred_language="zh")
+        self.assertEqual(
+            chinese,
+            "\n".join(
+                [
+                    "Chinese · Noun",
+                    "- angel",
+                    "- (obsolete) envoy sent by Heaven or Son of Heaven; imperial or heavenly emissary",
+                ]
+            ),
+        )
+
+    def test_wiktionary_source_keeps_raw_separate_from_preview(self):
+        raw = "==English==\n===Phrase===\n{{head|en|phrase}}\n# {{alt form|en|tl;dr}}."
+        spec = next(item for item in api_helpers.LOOKUP_SOURCE_SPECS if item["id"] == "wiktionary")
+
+        with patch.object(api_helpers, "_try_fetch_text", return_value=raw):
+            result = asyncio.run(api_helpers._fetch_lookup_source_entry(spec, "tldr", preferred_language="en"))
+
+        self.assertEqual(result["preview"], "English · Phrase\n- Alternative form of tl;dr.")
+        self.assertEqual(result["raw"], raw)
+        self.assertIn("{{head|en|phrase}}", result["raw"])
 
     def test_autocomplete_local_returns_json(self):
         fake_local = MagicMock()

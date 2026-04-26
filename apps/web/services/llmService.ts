@@ -99,6 +99,7 @@ const normalizeLookupSources = (value: unknown): LookupSource[] =>
           pageUrl: toStringValue(source.pageUrl),
           fetchUrl: toStringValue(source.fetchUrl),
           preview: toStringValue(source.preview),
+          raw: toStringValue(source.raw),
         }];
       })
     : [];

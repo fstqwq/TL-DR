@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "npm --prefix apps/web run dev",
     "build": "npm --prefix apps/web run build",
-    "preview": "npm --prefix apps/web run preview"
+    "preview": "npm --prefix apps/web run preview",
+    "test:source-previews": "npm --prefix apps/web run test:source-previews"
   }
 }

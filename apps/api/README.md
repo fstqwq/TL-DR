@@ -142,6 +142,10 @@ Dictionary lookup with LLM translation. Returns a `text/event-stream` with event
 3. `progress` (`stage=generate`)
 4. `result`
 
+`sources` entries include `preview` for display/augmentation. Some remote sources also include
+`raw` with the original fetched text for source inspection; clients should display `raw` only in
+expanded/debug views and continue using `preview` for compact source cards.
+
 When local dictionary data is available, lookup augmentation includes matching `zh/ja` entries in this format:
 
 ```text

@@ -15,6 +15,31 @@ HTTP_TIMEOUT_SECONDS = 1.0
 LOOKUP_SOURCES_TIMEOUT_SECONDS = 2.0
 MAX_SOURCE_CHARS = 1200
 MAX_TOTAL_CHARS = 3200
+MAX_RAW_SOURCE_CHARS = 4000
+WIKTIONARY_LANGUAGE_BY_CODE = {
+    "en": "English",
+    "zh": "Chinese",
+    "ja": "Japanese",
+}
+WIKTIONARY_PARTS_OF_SPEECH = {
+    "adjective",
+    "adverb",
+    "conjunction",
+    "counter",
+    "determiner",
+    "interjection",
+    "noun",
+    "numeral",
+    "particle",
+    "phrase",
+    "prefix",
+    "preposition",
+    "pronoun",
+    "proper noun",
+    "proverb",
+    "suffix",
+    "verb",
+}
 LOCAL_PROVIDER_NAMES = {
     "cc-cedict": "CC-CEDICT",
     "jmdict": "JMdict",
@@ -163,17 +188,212 @@ def _http_get_text(url: str, source: str, timeout: float = HTTP_TIMEOUT_SECONDS)
     return response.text or ""
 
 
-def _clean_wiktionary_markup(text: str) -> str:
-    if not text:
+def _format_wiktionary_preview(text: str, preferred_language: str = "auto") -> str:
+    language_blocks = _wiktionary_language_blocks(text)
+    if not language_blocks:
         return ""
-    cleaned = text.replace("\r", "")
+
+    language_name, language_lines = _select_wiktionary_language_block(language_blocks, preferred_language)
+    sections = _wiktionary_definition_sections(language_lines)
+    if not sections:
+        return ""
+
+    output: list[str] = []
+    for section in sections[:2]:
+        definitions = [
+            definition
+            for definition in (
+                _clean_wiktionary_definition(line)
+                for line in section["lines"]
+                if re.match(r"^#(?![:*#])\s*\S", line.strip())
+            )
+            if definition
+        ]
+        if not definitions:
+            continue
+        output.append(f"{language_name} · {section['title']}")
+        output.extend(f"- {definition}" for definition in definitions[:6])
+
+    return "\n".join(output)[:MAX_SOURCE_CHARS]
+
+
+def _wiktionary_language_blocks(text: str) -> list[tuple[str, list[str]]]:
+    lines = [line.rstrip() for line in str(text or "").replace("\r", "").splitlines()]
+    blocks: list[tuple[str, list[str]]] = []
+    current_name = ""
+    current_lines: list[str] = []
+
+    for line in lines:
+        heading = re.match(r"^==\s*([^=]+?)\s*==\s*$", line.strip())
+        if heading:
+            if current_name:
+                blocks.append((current_name, current_lines))
+            current_name = heading.group(1).strip()
+            current_lines = []
+            continue
+        if current_name:
+            current_lines.append(line)
+
+    if current_name:
+        blocks.append((current_name, current_lines))
+    return blocks
+
+
+def _select_wiktionary_language_block(
+    blocks: list[tuple[str, list[str]]],
+    preferred_language: str,
+) -> tuple[str, list[str]]:
+    preferred_name = WIKTIONARY_LANGUAGE_BY_CODE.get(str(preferred_language or "").lower())
+    if preferred_name:
+        for name, lines in blocks:
+            if name == preferred_name and _wiktionary_definition_sections(lines):
+                return name, lines
+
+    for name, lines in blocks:
+        if _wiktionary_definition_sections(lines):
+            return name, lines
+    return blocks[0]
+
+
+def _wiktionary_definition_sections(lines: list[str]) -> list[dict[str, object]]:
+    sections: list[dict[str, object]] = []
+    active_title = ""
+    active_level = 0
+    active_lines: list[str] = []
+
+    def flush() -> None:
+        if active_title and _wiktionary_section_has_definitions(active_lines):
+            sections.append({"title": active_title, "lines": active_lines[:]})
+
+    for line in lines:
+        heading = re.match(r"^(={3,6})\s*([^=]+?)\s*\1\s*$", line.strip())
+        if heading:
+            level = len(heading.group(1))
+            title = heading.group(2).strip()
+            normalized_title = title.lower()
+            if active_title and level <= active_level:
+                flush()
+                active_title = ""
+                active_level = 0
+                active_lines = []
+            if normalized_title in WIKTIONARY_PARTS_OF_SPEECH:
+                active_title = title
+                active_level = level
+                active_lines = []
+                continue
+            if active_title and level <= active_level:
+                continue
+
+        if active_title:
+            active_lines.append(line)
+
+    flush()
+    return sections
+
+
+def _wiktionary_section_has_definitions(lines: list[str]) -> bool:
+    return any(re.match(r"^#(?![:*#])\s*\S", line.strip()) for line in lines)
+
+
+def _clean_wiktionary_definition(line: str) -> str:
+    cleaned = re.sub(r"^#\s*", "", line.strip())
     cleaned = re.sub(r"<[^>]+>", "", cleaned)
     cleaned = re.sub(r"\[\[(?:[^|\]]+\|)?([^\]]+)\]\]", r"\1", cleaned)
-    cleaned = re.sub(r"\{\{[^{}]{1,120}\}\}", "", cleaned)
-    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-    if not lines:
+    cleaned = re.sub(r"\{\{([^{}]{1,240})\}\}", _replace_wiktionary_template, cleaned)
+    cleaned = re.sub(r"\{\{[^{}]{1,240}\}\}", "", cleaned)
+    cleaned = cleaned.replace("'''", "").replace("''", "")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s+([.;:,\)])", r"\1", cleaned)
+    cleaned = re.sub(r"(\()\s+", r"\1", cleaned)
+    cleaned = cleaned.strip()
+    if re.fullmatch(r"[.;:,]*", cleaned):
         return ""
-    return "\n".join(lines[:30])[:MAX_SOURCE_CHARS]
+    return cleaned
+
+
+def _clean_wiktionary_template_value(value: str) -> str:
+    cleaned = str(value or "").strip()
+    cleaned = re.sub(r"\[\[(?:[^|\]]+\|)?([^\]]+)\]\]", r"\1", cleaned)
+    cleaned = cleaned.replace("'''", "").replace("''", "")
+    return cleaned.strip()
+
+
+def _wiktionary_template_args(template: str) -> tuple[str, list[str], dict[str, str]]:
+    parts = [part.strip() for part in template.split("|")]
+    if not parts:
+        return "", [], {}
+    name = parts[0].strip().lower().replace("_", " ")
+    positional: list[str] = []
+    named: dict[str, str] = {}
+    for part in parts[1:]:
+        if re.match(r"^[A-Za-z][A-Za-z0-9_-]*\s*=", part):
+            key, value = part.split("=", 1)
+            named[key.strip().lower()] = _clean_wiktionary_template_value(value)
+        else:
+            positional.append(_clean_wiktionary_template_value(part))
+    return name, positional, named
+
+
+def _term_after_language(positional: list[str]) -> str:
+    if len(positional) >= 2:
+        return positional[1]
+    if positional:
+        return positional[0]
+    return ""
+
+
+def _replace_wiktionary_template(match: re.Match[str]) -> str:
+    name, positional, _named = _wiktionary_template_args(match.group(1))
+    if not name:
+        return ""
+
+    if name in {"head", "en-noun", "ja-noun", "zh-noun", "ja-verb", "ja-adj", "wikipedia"}:
+        return ""
+
+    if name in {"l", "link", "m", "mention", "w"}:
+        return _term_after_language(positional)
+
+    if name in {"lb", "label", "q", "qualifier", "i", "gloss"}:
+        labels = [value for value in positional[1:] if value]
+        return f"({'; '.join(labels)})" if labels else ""
+
+    if name == "hanja form of":
+        term = positional[0] if positional else ""
+        gloss = positional[1] if len(positional) > 1 else ""
+        if term and gloss:
+            return f"Hanja form of {term}: {gloss}"
+        return f"Hanja form of {term}" if term else ""
+
+    definition_templates = {
+        "alt form": "Alternative form of",
+        "alt form of": "Alternative form of",
+        "alternative form of": "Alternative form of",
+        "altcase": "Alternative letter-case form of",
+        "abbreviation of": "Abbreviation of",
+        "acronym of": "Acronym of",
+        "initialism of": "Initialism of",
+        "clipping of": "Clipping of",
+        "contraction of": "Contraction of",
+        "plural of": "Plural of",
+        "singular of": "Singular of",
+        "comparative of": "Comparative of",
+        "superlative of": "Superlative of",
+        "past of": "Past tense of",
+        "present participle of": "Present participle of",
+        "gerund of": "Gerund of",
+        "misspelling of": "Misspelling of",
+    }
+    if name in definition_templates:
+        term = _term_after_language(positional)
+        return f"{definition_templates[name]} {term}" if term else definition_templates[name]
+
+    if name == "inflection of":
+        term = _term_after_language(positional)
+        tags = [value for value in positional[2:] if value and value != ";"]
+        suffix = f" ({', '.join(tags)})" if tags else ""
+        return f"Inflection of {term}{suffix}" if term else ""
+
+    return ""
 
 
 def _format_dictionaryapi_payload(text: str) -> str:
@@ -270,21 +490,10 @@ def _format_jisho_payload(text: str) -> str:
     return "\n".join(lines)[:MAX_SOURCE_CHARS]
 
 
-def _format_wiktionary_raw(text: str) -> str:
+def _format_wiktionary_raw(text: str, preferred_language: str = "auto") -> str:
     if not text:
         return ""
-    marker_candidates = ("==English==", "==Japanese==", "==Chinese==")
-    for marker in marker_candidates:
-        idx = text.find(marker)
-        if idx >= 0:
-            text = text[idx : idx + MAX_SOURCE_CHARS]
-            break
-    else:
-        text = text[:MAX_SOURCE_CHARS]
-    cleaned = _clean_wiktionary_markup(text)
-    if not cleaned:
-        return ""
-    return cleaned[:MAX_SOURCE_CHARS]
+    return _format_wiktionary_preview(text, preferred_language=preferred_language)
 
 
 def _format_weblio_html(text: str) -> str:
@@ -340,26 +549,36 @@ LOOKUP_SOURCE_SPECS = (
 )
 
 
-async def _fetch_lookup_source_entry(spec: dict[str, object], word: str) -> dict[str, object]:
+async def _fetch_lookup_source_entry(
+    spec: dict[str, object],
+    word: str,
+    preferred_language: str = "auto",
+) -> dict[str, object]:
     source_id = str(spec["id"])
     fetch_url = spec["fetch_url"](word)
     raw = await asyncio.to_thread(_try_fetch_text, fetch_url, source_id)
     formatter = spec["formatter"]
-    snippet = formatter(raw) if callable(formatter) else ""
+    if callable(formatter) and source_id == "wiktionary":
+        snippet = formatter(raw, preferred_language=preferred_language)
+    else:
+        snippet = formatter(raw) if callable(formatter) else ""
 
-    return {
+    result = {
         "id": source_id,
         "name": str(spec["name"]),
         "pageUrl": spec["page_url"](word),
         "fetchUrl": fetch_url,
         "preview": snippet,
     }
+    if source_id == "wiktionary" and raw:
+        result["raw"] = raw[:MAX_RAW_SOURCE_CHARS]
+    return result
 
 
-async def _lookupdictionary_async(word: str) -> dict[str, object]:
-    logger.info("lookupdictionary_start word=%s", word)
+async def _lookupdictionary_async(word: str, preferred_language: str = "auto") -> dict[str, object]:
+    logger.info("lookupdictionary_start word=%s preferred_language=%s", word, preferred_language)
     tasks = [
-        asyncio.create_task(_fetch_lookup_source_entry(spec, word))
+        asyncio.create_task(_fetch_lookup_source_entry(spec, word, preferred_language=preferred_language))
         for spec in LOOKUP_SOURCE_SPECS
     ]
     done, pending = await asyncio.wait(tasks, timeout=LOOKUP_SOURCES_TIMEOUT_SECONDS)
@@ -460,23 +679,29 @@ def _local_lookup_bundle(word: str, local_autocomplete) -> dict[str, object]:
 
 
 @lru_cache(maxsize=128)
-def _lookupdictionary_remote_bundle(word: str) -> dict[str, object]:
+def _lookupdictionary_remote_bundle(word: str, preferred_language: str = "auto") -> dict[str, object]:
     query = word.strip() if isinstance(word, str) else ""
     if not query:
         return {"augmented_content": "", "sources": []}
+    normalized_language = preferred_language if preferred_language in {"en", "zh", "ja"} else "auto"
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(_lookupdictionary_async(query))
+        return loop.run_until_complete(_lookupdictionary_async(query, preferred_language=normalized_language))
     finally:
         loop.close()
 
 
-def lookupdictionary_bundle(word: str, local_autocomplete=None) -> dict[str, object]:
+def lookupdictionary_bundle(
+    word: str,
+    local_autocomplete=None,
+    preferred_language: str = "auto",
+) -> dict[str, object]:
     query = word.strip() if isinstance(word, str) else ""
     if not query:
         return {"augmented_content": "", "sources": []}
 
-    remote_bundle = _lookupdictionary_remote_bundle(query)
+    normalized_language = preferred_language if preferred_language in {"en", "zh", "ja"} else "auto"
+    remote_bundle = _lookupdictionary_remote_bundle(query, normalized_language)
     local_bundle = _local_lookup_bundle(query, local_autocomplete)
 
     local_sources = local_bundle.get("sources", [])
