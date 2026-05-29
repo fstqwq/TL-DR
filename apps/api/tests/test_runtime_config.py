@@ -14,6 +14,7 @@ if str(API_DIR) not in sys.path:
 os.environ.setdefault("CONFIG_PATH", str(API_DIR / "config_example.json"))
 os.environ.setdefault("API_KEY", "unit-test-key")
 os.environ.setdefault("CLARIFAI_API_KEY", "unit-test-clarifai-key")
+os.environ.setdefault("CEREBRAS_API_KEY", "unit-test-cerebras-key")
 
 import runtime_config  # noqa: E402
 
@@ -28,6 +29,7 @@ class RuntimeConfigTestCase(unittest.TestCase):
                     "params": {
                         "reasoning_effort": "none",
                         "temperature": 0.2,
+                        "top_p": 0.9,
                         "max_completion_tokens": 128,
                         "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
                         "response_format": {"type": "json_schema"},
@@ -44,6 +46,7 @@ class RuntimeConfigTestCase(unittest.TestCase):
                 "model-a": {
                     "reasoning_effort": "none",
                     "temperature": 0.2,
+                    "top_p": 0.9,
                     "max_completion_tokens": 128,
                     "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
                     "response_format": {"type": "json_schema"},

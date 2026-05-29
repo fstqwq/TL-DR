@@ -3,12 +3,14 @@ from __future__ import annotations
 import gzip
 import json
 import lzma
+import pickle
 import re
 import sys
 import tempfile
 import unicodedata
 import urllib.request
 import xml.etree.ElementTree as ET
+from array import array
 from collections import Counter
 from functools import lru_cache
 from pathlib import Path
@@ -27,6 +29,8 @@ CEDICT_PATH = DATA_DIR / "cc-cedict.txt.gz"
 JMDICT_PATH = DATA_DIR / "JMdict_e.gz"
 CMUDICT_PATH = DATA_DIR / "cmudict.dict"
 OUTPUT_PATH = DATA_DIR / "lexicon.json.xz"
+PACKED_INDEX_FORMAT = "packed-index-v1"
+LANG_TO_CODE = {"zh": 1, "ja": 2, "en": 3}
 
 DATASET_DOWNLOADS = {
     "cedict": {
@@ -123,8 +127,9 @@ def build_compact_index_from_entries(
     ]
 
     meta: dict[str, object] = {
-        "version": 3,
+        "version": 4,
         "source": "direct_entries",
+        "format": PACKED_INDEX_FORMAT,
         "entry_count": len(entries_payload),
         "alias_count": alias_count,
         "source_count": len(source_names),
@@ -137,14 +142,75 @@ def build_compact_index_from_entries(
     if meta_extra:
         meta.update(meta_extra)
 
+    source_ids: dict[str, int] = {}
+    sources: list[str] = []
+    alias_buckets: dict[str, list[tuple[int, int]]] = {}
+    surfaces: list[str] = []
+    readings: list[str] = []
+    meanings: list[str] = []
+    lang_codes = bytearray()
+
+    def source_id_for(source: str) -> int:
+        existing = source_ids.get(source)
+        if existing is not None:
+            return existing
+        source_id = len(sources)
+        source_ids[source] = source_id
+        sources.append(source)
+        return source_id
+
+    for entry_id, entry in enumerate(entries_payload):
+        surfaces.append(str(entry["surface"]))
+        readings.append(str(entry["reading"]))
+        meanings.append(str(entry["meaning"]))
+        lang_codes.append(LANG_TO_CODE.get(str(entry["lang"]), 0))
+        for source, alias_values in entry["aliases"].items():
+            source_id = source_id_for(str(source))
+            for alias in alias_values:
+                alias_buckets.setdefault(str(alias), []).append((entry_id, source_id))
+
+    aliases = sorted(alias_buckets)
+    alias_offsets = array("I", [0])
+    alias_parts: list[bytes] = []
+    alias_total = 0
+    posting_offsets = array("I", [0])
+    posting_entry_ids = array("I")
+    posting_source_ids = array("H")
+
+    for alias in aliases:
+        encoded = alias.encode("utf-8")
+        alias_parts.append(encoded)
+        alias_total += len(encoded)
+        alias_offsets.append(alias_total)
+        for entry_id, source_id in alias_buckets[alias]:
+            posting_entry_ids.append(entry_id)
+            posting_source_ids.append(source_id)
+        posting_offsets.append(len(posting_entry_ids))
+
     payload = {
+        "format": PACKED_INDEX_FORMAT,
         "meta": meta,
-        "entries": entries_payload,
+        "aliases": {
+            "blob": b"".join(alias_parts),
+            "offsets": alias_offsets,
+        },
+        "postings": {
+            "offsets": posting_offsets,
+            "entry_ids": posting_entry_ids,
+            "source_ids": posting_source_ids,
+        },
+        "entries": {
+            "surfaces": surfaces,
+            "readings": readings,
+            "meanings": meanings,
+            "lang_codes": bytes(lang_codes),
+        },
+        "sources": sources,
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with lzma.open(output_path, "wt", encoding="utf-8", preset=9) as handle:
-        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
+    with lzma.open(output_path, "wb", preset=9) as handle:
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
     return meta
 
 

@@ -19,6 +19,7 @@ AUTOCOMPLETE_RATE_LIMIT_PER_MINUTE = max(1, int(round(RATE_LIMIT * 3)))
 ALLOWED_MODEL_PARAM_KEYS = {
     "reasoning_effort",
     "temperature",
+    "top_p",
     "max_completion_tokens",
     "max_tokens",
     "extra_body",
@@ -60,7 +61,7 @@ def _validate_model_params(params: object, field_name: str) -> dict[str, Any]:
                 )
             normalized[key] = effort
             continue
-        if key == "temperature":
+        if key in {"temperature", "top_p"}:
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 raise RuntimeError(f"Invalid backend config: '{field_name}.{key}' must be a number.")
             normalized[key] = value

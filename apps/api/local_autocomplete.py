@@ -8,6 +8,7 @@ import pickle
 import re
 import threading
 import unicodedata
+from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -407,25 +408,184 @@ class CompactIndex:
     meta: dict[str, object]
 
 
-def load_compact_index(path: Path) -> CompactIndex:
+PACKED_INDEX_FORMAT = "packed-index-v1"
+LANG_TO_CODE = {"zh": 1, "ja": 2, "en": 3}
+CODE_TO_LANG = ("", "zh", "ja", "en")
+
+
+class PackedAliases:
+    def __init__(self, blob: bytes, offsets: array):
+        self.blob = blob
+        self.offsets = offsets
+
+    def __len__(self) -> int:
+        return max(0, len(self.offsets) - 1)
+
+    def __getitem__(self, index: int | slice) -> str | list[str]:
+        if isinstance(index, slice):
+            start, stop, step = index.indices(len(self))
+            return [self[pos] for pos in range(start, stop, step)]
+        start = int(self.offsets[index])
+        end = int(self.offsets[index + 1])
+        return self.blob[start:end].decode("utf-8")
+
+
+@dataclass
+class PackedIndex:
+    aliases: PackedAliases
+    posting_offsets: array
+    posting_entry_ids: array
+    posting_source_ids: array
+    sources: list[str]
+    surfaces: list[str]
+    readings: list[str]
+    meanings: list[str]
+    lang_codes: bytes
+    meta: dict[str, object]
+
+    @property
+    def entry_count(self) -> int:
+        return len(self.surfaces)
+
+
+IndexLike = CompactIndex | PackedIndex
+
+
+def _array_from(value: object, typecode: str) -> array:
+    if isinstance(value, array) and value.typecode == typecode:
+        return value
+    return array(typecode, value if isinstance(value, list) else [])
+
+
+def _make_packed_aliases(aliases: list[str]) -> PackedAliases:
+    offsets = array("I", [0])
+    parts: list[bytes] = []
+    total = 0
+    for alias in aliases:
+        encoded = alias.encode("utf-8")
+        parts.append(encoded)
+        total += len(encoded)
+        offsets.append(total)
+    return PackedAliases(b"".join(parts), offsets)
+
+
+def _pack_entry_fields(entries: list[tuple[str, str, str, str]]) -> tuple[list[str], list[str], list[str], bytes]:
+    surfaces: list[str] = []
+    readings: list[str] = []
+    meanings: list[str] = []
+    lang_codes = bytearray()
+    for surface, reading, lang, meaning in entries:
+        surfaces.append(surface)
+        readings.append(reading)
+        meanings.append(meaning)
+        lang_codes.append(LANG_TO_CODE.get(lang, 0))
+    return surfaces, readings, meanings, bytes(lang_codes)
+
+
+def _build_packed_index(
+    entries: list[tuple[str, str, str, str]],
+    alias_buckets: dict[str, list[tuple[int, int]]],
+    sources: list[str],
+    meta: dict[str, object],
+) -> PackedIndex:
+    aliases = sorted(alias_buckets)
+    posting_offsets = array("I", [0])
+    posting_entry_ids = array("I")
+    posting_source_ids = array("H")
+
+    for alias in aliases:
+        for entry_id, source_id in alias_buckets[alias]:
+            posting_entry_ids.append(entry_id)
+            posting_source_ids.append(source_id)
+        posting_offsets.append(len(posting_entry_ids))
+
+    surfaces, readings, meanings, lang_codes = _pack_entry_fields(entries)
+    return PackedIndex(
+        aliases=_make_packed_aliases(aliases),
+        posting_offsets=posting_offsets,
+        posting_entry_ids=posting_entry_ids,
+        posting_source_ids=posting_source_ids,
+        sources=sources,
+        surfaces=surfaces,
+        readings=readings,
+        meanings=meanings,
+        lang_codes=lang_codes,
+        meta=dict(meta),
+    )
+
+
+def load_compact_index(path: Path) -> IndexLike:
     with lzma.open(path, "rb") as handle:
-        raw = handle.read()
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-        return _load_json_compact_index(payload)
-    except Exception:
-        payload = pickle.loads(raw)
+        prefix = handle.read(64).lstrip()
+        handle.seek(0)
+        if prefix.startswith((b"{", b"[")):
+            payload = json.loads(handle.read().decode("utf-8"))
+            return _load_json_compact_index(payload)
+
+        payload = pickle.load(handle)
+        if isinstance(payload, dict) and payload.get("format") == PACKED_INDEX_FORMAT:
+            return _load_packed_compact_index(payload)
         return _load_legacy_compact_index(payload)
 
 
-def _load_json_compact_index(payload: dict[str, object]) -> CompactIndex:
+def _load_packed_compact_index(payload: dict[str, object]) -> PackedIndex:
+    aliases = payload.get("aliases")
+    postings = payload.get("postings")
+    entries = payload.get("entries")
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    sources = payload.get("sources")
+    if not isinstance(aliases, dict) or not isinstance(postings, dict) or not isinstance(entries, dict):
+        raise ValueError("invalid packed compact index")
+    if not isinstance(sources, list):
+        raise ValueError("invalid packed compact index: sources missing")
+
+    alias_blob = aliases.get("blob")
+    lang_codes = entries.get("lang_codes")
+    if not isinstance(alias_blob, bytes):
+        raise ValueError("invalid packed compact index: alias blob missing")
+    if not isinstance(lang_codes, (bytes, bytearray)):
+        raise ValueError("invalid packed compact index: lang codes missing")
+
+    surfaces = entries.get("surfaces")
+    readings = entries.get("readings")
+    meanings = entries.get("meanings")
+    if not isinstance(surfaces, list) or not isinstance(readings, list) or not isinstance(meanings, list):
+        raise ValueError("invalid packed compact index: entries missing")
+
+    return PackedIndex(
+        aliases=PackedAliases(alias_blob, _array_from(aliases.get("offsets"), "I")),
+        posting_offsets=_array_from(postings.get("offsets"), "I"),
+        posting_entry_ids=_array_from(postings.get("entry_ids"), "I"),
+        posting_source_ids=_array_from(postings.get("source_ids"), "H"),
+        sources=[str(source) for source in sources],
+        surfaces=[str(surface) for surface in surfaces],
+        readings=[str(reading) for reading in readings],
+        meanings=[str(meaning) for meaning in meanings],
+        lang_codes=bytes(lang_codes),
+        meta=dict(meta),
+    )
+
+
+def _load_json_compact_index(payload: dict[str, object]) -> IndexLike:
     raw_entries = payload.get("entries")
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
     if not isinstance(raw_entries, list):
         raise ValueError("invalid compact index: entries missing")
 
-    entries: list[dict[str, str]] = []
-    alias_buckets: dict[str, list[tuple[int, str]]] = {}
+    entries: list[tuple[str, str, str, str]] = []
+    alias_buckets: dict[str, list[tuple[int, int]]] = {}
+    sources: list[str] = []
+    source_ids: dict[str, int] = {}
+
+    def source_id_for(source: str) -> int:
+        existing = source_ids.get(source)
+        if existing is not None:
+            return existing
+        source_id = len(sources)
+        source_ids[source] = source_id
+        sources.append(source)
+        return source_id
+
     for raw_entry in raw_entries:
         if not isinstance(raw_entry, dict):
             continue
@@ -437,14 +597,7 @@ def _load_json_compact_index(payload: dict[str, object]) -> CompactIndex:
         if not surface or lang not in {"zh", "ja", "en"}:
             continue
 
-        entries.append(
-            {
-                "surface": surface,
-                "reading": reading,
-                "lang": lang,
-                "meaning": meaning,
-            }
-        )
+        entries.append((surface, reading, lang, meaning))
         entry_id = len(entries) - 1
 
         if not isinstance(aliases_by_source, dict):
@@ -452,25 +605,19 @@ def _load_json_compact_index(payload: dict[str, object]) -> CompactIndex:
         for source, alias_values in aliases_by_source.items():
             if not isinstance(source, str) or not isinstance(alias_values, list):
                 continue
+            source_id = source_id_for(source)
             seen_for_source: set[str] = set()
             for alias in alias_values:
                 alias_norm = normalize_query(str(alias))
                 if not alias_norm or alias_norm in seen_for_source:
                     continue
                 seen_for_source.add(alias_norm)
-                alias_buckets.setdefault(alias_norm, []).append((entry_id, source))
+                alias_buckets.setdefault(alias_norm, []).append((entry_id, source_id))
 
-    aliases = sorted(alias_buckets)
-    postings = [alias_buckets[alias] for alias in aliases]
-    return CompactIndex(
-        aliases=aliases,
-        postings=postings,
-        entries=entries,
-        meta=dict(meta),
-    )
+    return _build_packed_index(entries, alias_buckets, sources, dict(meta))
 
 
-def _load_legacy_compact_index(payload: dict[str, object]) -> CompactIndex:
+def _load_legacy_compact_index(payload: dict[str, object]) -> IndexLike:
     raw_entries = payload.get("entries")
     raw_postings = payload.get("postings")
     raw_sources = payload.get("sources")
@@ -479,32 +626,63 @@ def _load_legacy_compact_index(payload: dict[str, object]) -> CompactIndex:
     if not isinstance(raw_entries, list) or not isinstance(raw_postings, list) or not isinstance(raw_sources, list) or not isinstance(raw_aliases, list):
         raise ValueError("invalid legacy compact index")
 
-    entries = [
-        {
-            "surface": str(surface),
-            "reading": str(reading),
-            "lang": str(lang),
-            "meaning": "",
-        }
-        for surface, reading, lang in raw_entries
-    ]
+    entries = [(str(surface), str(reading), str(lang), "") for surface, reading, lang in raw_entries]
     sources = [str(source) for source in raw_sources]
-    postings: list[list[tuple[int, str]]] = []
+    posting_offsets = array("I", [0])
+    posting_entry_ids = array("I")
+    posting_source_ids = array("H")
     for bucket in raw_postings:
-        posting_bucket: list[tuple[int, str]] = []
         for entry_id, source_id, _score100 in bucket:
-            posting_bucket.append((int(entry_id), sources[int(source_id)]))
-        postings.append(posting_bucket)
+            posting_entry_ids.append(int(entry_id))
+            posting_source_ids.append(int(source_id))
+        posting_offsets.append(len(posting_entry_ids))
 
-    return CompactIndex(
-        aliases=[str(alias) for alias in raw_aliases],
-        postings=postings,
-        entries=entries,
+    surfaces, readings, meanings, lang_codes = _pack_entry_fields(entries)
+    return PackedIndex(
+        aliases=_make_packed_aliases([str(alias) for alias in raw_aliases]),
+        posting_offsets=posting_offsets,
+        posting_entry_ids=posting_entry_ids,
+        posting_source_ids=posting_source_ids,
+        sources=sources,
+        surfaces=surfaces,
+        readings=readings,
+        meanings=meanings,
+        lang_codes=lang_codes,
         meta=dict(meta),
     )
 
 
-def _rows_for_alias_range(index: CompactIndex, start: int, end: int, limit: int) -> list[dict[str, object]]:
+def _rows_for_packed_alias_range(index: PackedIndex, start: int, end: int, limit: int) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for alias_pos in range(start, end):
+        alias_norm = index.aliases[alias_pos]
+        posting_start = int(index.posting_offsets[alias_pos])
+        posting_end = int(index.posting_offsets[alias_pos + 1])
+        for posting_rank, posting_pos in enumerate(range(posting_start, posting_end)):
+            entry_id = int(index.posting_entry_ids[posting_pos])
+            source_id = int(index.posting_source_ids[posting_pos])
+            lang_code = index.lang_codes[entry_id] if entry_id < len(index.lang_codes) else 0
+            rows.append(
+                {
+                    "entry_id": entry_id,
+                    "alias_norm": alias_norm,
+                    "surface": index.surfaces[entry_id],
+                    "reading": index.readings[entry_id],
+                    "meaning": index.meanings[entry_id],
+                    "lang": CODE_TO_LANG[lang_code] if lang_code < len(CODE_TO_LANG) else "",
+                    "source": index.sources[source_id] if source_id < len(index.sources) else "",
+                    "posting_rank": posting_rank,
+                }
+            )
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+def _rows_for_alias_range(index: IndexLike, start: int, end: int, limit: int) -> list[dict[str, object]]:
+    if isinstance(index, PackedIndex):
+        return _rows_for_packed_alias_range(index, start, end, limit)
+
     rows: list[dict[str, object]] = []
     for pos in range(start, end):
         alias_norm = index.aliases[pos]
@@ -527,14 +705,14 @@ def _rows_for_alias_range(index: CompactIndex, start: int, end: int, limit: int)
     return rows
 
 
-def prefix_rows(index: CompactIndex, query_norm: str, limit: int) -> list[dict[str, object]]:
+def prefix_rows(index: IndexLike, query_norm: str, limit: int) -> list[dict[str, object]]:
     upper = query_norm + "\U0010FFFF"
     start = bisect.bisect_left(index.aliases, query_norm)
     end = bisect.bisect_left(index.aliases, upper)
     return _rows_for_alias_range(index, start, end, limit)
 
 def _collect_prefix_matches(
-    index: CompactIndex,
+    index: IndexLike,
     query_text: str,
     preferred_language: str = "auto",
     limit: int = 50,
@@ -567,7 +745,7 @@ def _collect_prefix_matches(
 
 
 def search_single_segment(
-    index: CompactIndex,
+    index: IndexLike,
     query: str,
     preferred_language: str = "auto",
     limit: int = 3,
@@ -601,7 +779,7 @@ def search_single_segment(
 
 
 def search_compact_index(
-    index: CompactIndex,
+    index: IndexLike,
     query: str,
     preferred_language: str = "auto",
     limit: int = 3,
@@ -682,7 +860,7 @@ class LocalAutocomplete:
     def __init__(self, index_path: str | Path | None):
         self.index_path = Path(index_path) if index_path else None
         self._lock = threading.Lock()
-        self._index: CompactIndex | None = None
+        self._index: IndexLike | None = None
         self._load_attempted = False
 
     def search(self, query: str, preferred_language: str = "auto", limit: int = 3) -> list[dict[str, str]]:
@@ -721,7 +899,7 @@ class LocalAutocomplete:
             if isinstance(lang, str) and isinstance(provider, str)
         }
 
-    def _ensure_index(self) -> CompactIndex | None:
+    def _ensure_index(self) -> IndexLike | None:
         if self._index is not None:
             return self._index
         if self._load_attempted:
@@ -741,7 +919,7 @@ class LocalAutocomplete:
                     "local_autocomplete_index_loaded path=%s aliases=%s entries=%s",
                     self.index_path,
                     len(self._index.aliases),
-                    len(self._index.entries),
+                    self._index.entry_count if isinstance(self._index, PackedIndex) else len(self._index.entries),
                 )
             except Exception:
                 logger.exception("local_autocomplete_index_failed path=%s", self.index_path)

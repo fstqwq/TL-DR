@@ -1,6 +1,6 @@
 import gzip
-import json
 import lzma
+import pickle
 import sys
 import tempfile
 import unittest
@@ -24,6 +24,7 @@ from build_autocomplete_index import (  # noqa: E402
     iter_jmdict_entries,
     normalize_pinyin,
 )
+from local_autocomplete import load_compact_index, search_compact_index  # noqa: E402
 
 
 class BuildAutocompleteIndexTestCase(unittest.TestCase):
@@ -111,7 +112,7 @@ class BuildAutocompleteIndexTestCase(unittest.TestCase):
         self.assertIn("watashi", entry["aliases"]["jmdict:romaji"])
         self.assertEqual(score, 5.0)
 
-    def test_build_compact_index_from_entries_writes_json_payload(self):
+    def test_build_compact_index_from_entries_writes_packed_payload(self):
         entries = [
             (
                 {
@@ -130,14 +131,18 @@ class BuildAutocompleteIndexTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "lexicon.json.xz"
             meta = build_compact_index_from_entries(entries, path, meta_extra={"builder": {"ok": True}})
-            with lzma.open(path, "rt", encoding="utf-8") as handle:
-                payload = json.load(handle)
+            with lzma.open(path, "rb") as handle:
+                payload = pickle.load(handle)
+            index = load_compact_index(path)
+            results = search_compact_index(index, "ceshi", preferred_language="zh", limit=3)
 
-        self.assertEqual(meta["version"], 3)
+        self.assertEqual(meta["version"], 4)
+        self.assertEqual(payload["format"], "packed-index-v1")
         self.assertIn("providers", payload["meta"])
-        self.assertNotIn("postings", payload)
-        self.assertEqual(payload["entries"][0]["surface"], "\u6d4b\u8bd5")
-        self.assertEqual(payload["entries"][0]["aliases"]["cc-cedict:pinyin"], ["ceshi"])
+        self.assertIn("postings", payload)
+        self.assertEqual(payload["entries"]["surfaces"][0], "\u6d4b\u8bd5")
+        self.assertEqual(results[0]["surface"], "\u6d4b\u8bd5")
+        self.assertEqual(results[0]["reading"], "c\u00e8 sh\u00ec")
 
 
 if __name__ == "__main__":

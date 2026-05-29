@@ -48,6 +48,7 @@ Each model may define a `params` object. Supported keys are:
 
 - `reasoning_effort`
 - `temperature`
+- `top_p`
 - `max_completion_tokens`
 - `max_tokens`
 - `extra_body`
@@ -97,7 +98,7 @@ For public deployments, do **not** expose the Flask dev server directly. Use a W
 An optional offline dictionary index that provides instant suggestions without an LLM round-trip.
 
 - **Code:** `local_autocomplete.py`
-- **Generated file:** `data/lexicon.json.xz` (JSON + xz, not committed to git)
+- **Generated file:** `data/lexicon.json.xz` (packed pickle + xz; legacy JSON + xz files still load)
 - If the file is missing, the backend still starts — `/api/autocomplete/local` returns an empty list.
 
 Local `zh/ja` dictionary entries are also used to augment `/api/lookup` results when available.
@@ -114,7 +115,7 @@ The build script will:
 2. Download any missing source files
 3. Build the ranked index → `apps/api/data/lexicon.json.xz`
 
-Each entry stores: `surface`, `reading`, `lang`, `meaning`, and alias groups. The backend rebuilds the in-memory alias index at startup.
+Each entry stores: `surface`, `reading`, `lang`, `meaning`, and alias groups. The build step writes a packed index so the backend can load it without retaining millions of Python dict/list/tuple objects.
 
 ### Source Datasets
 
