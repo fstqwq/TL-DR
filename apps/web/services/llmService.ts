@@ -9,8 +9,11 @@ export const setRuntimeConfig = (config: AppConfig) => {
 };
 
 const getApiBaseUrl = () => {
-  const RAW_BASE_URL = runtimeConfig.BACKEND_URL || 'http://localhost:5000';
-  return RAW_BASE_URL.replace(/\/$/, "");
+  const rawBaseUrl = typeof runtimeConfig.BACKEND_URL === "string"
+    ? runtimeConfig.BACKEND_URL.trim()
+    : 'http://localhost:5000';
+  if (!rawBaseUrl || rawBaseUrl === "/") return "";
+  return rawBaseUrl.replace(/\/$/, "");
 };
 
 const toStringValue = (value: unknown, fallback = ""): string =>
@@ -86,6 +89,20 @@ type LookupStreamHandlers = {
   onProgress?: (stage: string, message: string) => void;
   onSources?: (sources: LookupSource[]) => void;
   onError?: (stage: string, message: string) => void;
+};
+
+export const preconnectApi = async (signal?: AbortSignal): Promise<Record<string, unknown>> => {
+  const response = await fetch(`${getApiBaseUrl()}/api/preconnect`, {
+    method: 'POST',
+    signal,
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Backend Error: ${response.statusText}`);
+  }
+
+  return await response.json() as Record<string, unknown>;
 };
 
 const normalizeLookupSources = (value: unknown): LookupSource[] =>

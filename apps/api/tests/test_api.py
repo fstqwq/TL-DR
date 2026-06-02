@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi.testclient import TestClient
+
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 API_DIR = ROOT_DIR / "apps" / "api"
@@ -16,7 +18,9 @@ if str(API_DIR) not in sys.path:
 
 os.environ.setdefault("CONFIG_PATH", str(API_DIR / "config_example.json"))
 os.environ.setdefault("API_KEY", "unit-test-key")
+os.environ.setdefault("CEREBRAS_API_KEY", "unit-test-cerebras-key")
 os.environ.setdefault("CLARIFAI_API_KEY", "unit-test-clarifai-key")
+os.environ.setdefault("LOCAL_LEXICON_PATH", "")
 os.environ.setdefault("RATE_LIMIT_STORAGE_URI", "memory://")
 
 import app as api_app  # noqa: E402
@@ -62,13 +66,21 @@ def parse_sse_events(payload: str):
 
 
 class ApiEndpointsTestCase(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        api_app.app.config["TESTING"] = True
-
     def setUp(self):
-        self.client = api_app.app.test_client()
+        api_app._RATE_LIMIT_BUCKETS.clear()
+        self.client = TestClient(api_app.app)
         self.model_id = next(iter(api_app.MODELS.keys()))
+
+    def test_lifespan_preloads_local_autocomplete_and_closes_http_clients(self):
+        with (
+            patch.object(api_app.LOCAL_AUTOCOMPLETE, "preload", return_value=True) as preload_mock,
+            patch.object(api_app, "close_http_clients", AsyncMock()) as close_mock,
+            TestClient(api_app.app),
+        ):
+            pass
+
+        preload_mock.assert_called_once_with()
+        close_mock.assert_awaited_once_with()
 
     def test_lookup_rejects_stale_timestamp(self):
         response = self.client.post(
@@ -82,7 +94,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.get_json(), {"error": "Invalid request."})
+        self.assertEqual(response.json(), {"error": "Invalid request."})
 
     def test_lookup_streams_progress_then_result(self):
         fake_create = AsyncMock(return_value=make_chat_response('{"targetWord":"apple"}'))
@@ -101,8 +113,8 @@ class ApiEndpointsTestCase(unittest.TestCase):
             patch.object(api_app, "_client_for_model", return_value=fake_client) as client_selector,
             patch.object(
                 api_app,
-                "lookupdictionary_bundle",
-                return_value={"augmented_content": "", "sources": fake_sources},
+                "async_lookupdictionary_bundle",
+                AsyncMock(return_value={"augmented_content": "", "sources": fake_sources}),
             ) as lookup_bundle_mock,
         ):
             response = self.client.post(
@@ -113,12 +125,12 @@ class ApiEndpointsTestCase(unittest.TestCase):
                     "model": self.model_id,
                     "timestamp": int(time.time() * 1000),
                 },
-                buffered=True,
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.mimetype, "text/event-stream")
-        events = parse_sse_events(response.get_data(as_text=True))
+        self.assertTrue(response.headers["content-type"].startswith("text/event-stream"))
+        self.assertEqual(response.headers["x-accel-buffering"], "no")
+        events = parse_sse_events(response.text)
         self.assertEqual(
             events,
             [
@@ -130,7 +142,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         )
         self.assertEqual(fake_create.call_count, 1)
         client_selector.assert_called_once_with(self.model_id)
-        lookup_bundle_mock.assert_called_once_with(
+        lookup_bundle_mock.assert_awaited_once_with(
             "apple",
             local_autocomplete=api_app.LOCAL_AUTOCOMPLETE,
             preferred_language="en",
@@ -145,8 +157,18 @@ class ApiEndpointsTestCase(unittest.TestCase):
             patch.object(api_app, "_client_for_model", return_value=fake_client),
             patch.object(
                 api_app,
-                "lookupdictionary_bundle",
-                return_value={"augmented_content": "", "sources": []},
+                "async_lookupdictionary_bundle",
+                AsyncMock(return_value={"augmented_content": "", "sources": []}),
+            ),
+            patch.dict(
+                api_app.MODELS,
+                {model_id: "DeepSeek V3 0324"},
+                clear=False,
+            ),
+            patch.dict(
+                api_app.MODEL_PROVIDERS,
+                {model_id: "default"},
+                clear=False,
             ),
             patch.dict(
                 api_app.MODEL_PARAMS,
@@ -162,7 +184,6 @@ class ApiEndpointsTestCase(unittest.TestCase):
                     "model": model_id,
                     "timestamp": int(time.time() * 1000),
                 },
-                buffered=True,
             )
 
         self.assertEqual(response.status_code, 200)
@@ -182,8 +203,18 @@ class ApiEndpointsTestCase(unittest.TestCase):
             patch.object(api_app, "_client_for_model", return_value=fake_client),
             patch.object(
                 api_app,
-                "lookupdictionary_bundle",
-                return_value={"augmented_content": "", "sources": []},
+                "async_lookupdictionary_bundle",
+                AsyncMock(return_value={"augmented_content": "", "sources": []}),
+            ),
+            patch.dict(
+                api_app.MODELS,
+                {model_id: "GPT OSS 120B (Clarifai)"},
+                clear=False,
+            ),
+            patch.dict(
+                api_app.MODEL_PROVIDERS,
+                {model_id: "clarifai"},
+                clear=False,
             ),
             patch.dict(
                 api_app.MODEL_PARAMS,
@@ -199,7 +230,6 @@ class ApiEndpointsTestCase(unittest.TestCase):
                     "model": model_id,
                     "timestamp": int(time.time() * 1000),
                 },
-                buffered=True,
             )
 
         self.assertEqual(response.status_code, 200)
@@ -215,10 +245,12 @@ class ApiEndpointsTestCase(unittest.TestCase):
             patch.object(api_app, "_client_for_model", return_value=fake_client),
             patch.object(
                 api_app,
-                "lookupdictionary_bundle",
-                return_value={"augmented_content": "", "sources": []},
+                "async_lookupdictionary_bundle",
+                AsyncMock(return_value={"augmented_content": "", "sources": []}),
             ),
             patch.dict(api_app.MODEL_PARAMS, {model_id: {}}, clear=False),
+            patch.dict(api_app.MODELS, {model_id: "DeepSeek V3 0324"}, clear=False),
+            patch.dict(api_app.MODEL_PROVIDERS, {model_id: "default"}, clear=False),
         ):
             response = self.client.post(
                 "/api/lookup",
@@ -228,7 +260,6 @@ class ApiEndpointsTestCase(unittest.TestCase):
                     "model": model_id,
                     "timestamp": int(time.time() * 1000),
                 },
-                buffered=True,
             )
 
         self.assertEqual(response.status_code, 200)
@@ -244,8 +275,8 @@ class ApiEndpointsTestCase(unittest.TestCase):
             patch.object(api_app, "_client_for_model", return_value=fake_client),
             patch.object(
                 api_app,
-                "lookupdictionary_bundle",
-                return_value={"augmented_content": "", "sources": []},
+                "async_lookupdictionary_bundle",
+                AsyncMock(return_value={"augmented_content": "", "sources": []}),
             ),
         ):
             response = self.client.post(
@@ -256,12 +287,29 @@ class ApiEndpointsTestCase(unittest.TestCase):
                     "model": self.model_id,
                     "timestamp": int(time.time() * 1000),
                 },
-                buffered=True,
             )
 
         self.assertEqual(response.status_code, 200)
-        events = parse_sse_events(response.get_data(as_text=True))
+        events = parse_sse_events(response.text)
         self.assertEqual(events[-1], ("result", {"targetWord": "オーケストラレーション"}))
+
+    def test_preconnect_ignores_body_and_warms_all_sources(self):
+        fake_payload = {
+            "dictionaryapi": {"status": 200, "elapsedMs": 10.0},
+            "jisho": {"status": 200, "elapsedMs": 200.0},
+            "wiktionary": {"status": 200, "elapsedMs": 300.0},
+            "weblio": {"status": 200, "elapsedMs": 100.0},
+        }
+
+        with patch.object(api_app, "preconnect_lookup_sources", AsyncMock(return_value=fake_payload)) as preconnect_mock:
+            response = self.client.post(
+                "/api/preconnect",
+                json={"sources": ["jisho"]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ok": True, "sources": fake_payload})
+        preconnect_mock.assert_awaited_once_with()
 
     def test_lookup_helper_filters_failed_sources(self):
         fake_specs = (
@@ -367,10 +415,12 @@ class ApiEndpointsTestCase(unittest.TestCase):
             def text(self):
                 return self.content.decode(self.encoding or "utf-8", errors="replace")
 
-        fake_scraper = MagicMock()
-        fake_scraper.get.return_value = FakeResponse()
+        fake_client = MagicMock()
+        fake_client.get.return_value = FakeResponse()
+        fake_context = MagicMock()
+        fake_context.__enter__.return_value = fake_client
 
-        with patch.object(api_helpers.cloudscraper, "create_scraper", return_value=fake_scraper):
+        with patch.object(api_helpers.httpx, "Client", return_value=fake_context):
             text = api_helpers._http_get_text(
                 "https://api.dictionaryapi.dev/api/v2/entries/en/previous",
                 source="dictionaryapi",
@@ -379,6 +429,38 @@ class ApiEndpointsTestCase(unittest.TestCase):
 
         self.assertIn("/ˈpɹiːvɪəs/", text)
         self.assertNotIn("脌", text)
+
+    def test_http_clients_use_uniform_browser_user_agent_and_wiktionary_http2(self):
+        created = []
+
+        class FakeAsyncClient:
+            def __init__(self, **kwargs):
+                created.append(kwargs)
+
+        with patch.object(api_helpers.httpx, "AsyncClient", FakeAsyncClient):
+            api_helpers._ASYNC_HTTP_CLIENTS.clear()
+            api_helpers._http_client("jisho")
+            api_helpers._http_client("wiktionary")
+
+        self.assertEqual(created[0]["headers"]["User-Agent"], api_helpers.BROWSER_USER_AGENT)
+        self.assertEqual(created[1]["headers"]["User-Agent"], api_helpers.BROWSER_USER_AGENT)
+        self.assertFalse(created[0]["http2"])
+        self.assertTrue(created[1]["http2"])
+        api_helpers._ASYNC_HTTP_CLIENTS.clear()
+
+    def test_preconnect_lookup_sources_reports_source_errors(self):
+        async def fake_preconnect(spec):
+            source_id = spec["id"]
+            if source_id == "jisho":
+                raise RuntimeError("reset")
+            return source_id, {"status": 200, "elapsedMs": 1.0}
+
+        with patch.object(api_helpers, "_preconnect_lookup_source", side_effect=fake_preconnect):
+            result = asyncio.run(api_helpers.preconnect_lookup_sources())
+
+        self.assertEqual(set(result), {"dictionaryapi", "jisho", "wiktionary", "weblio"})
+        self.assertEqual(result["dictionaryapi"]["status"], 200)
+        self.assertIn("reset", result["jisho"]["error"])
 
     def test_wiktionary_formatter_preserves_definition_templates(self):
         raw = "\n".join(
@@ -496,7 +578,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         raw = "==English==\n===Phrase===\n{{head|en|phrase}}\n# {{alt form|en|tl;dr}}."
         spec = next(item for item in api_helpers.LOOKUP_SOURCE_SPECS if item["id"] == "wiktionary")
 
-        with patch.object(api_helpers, "_try_fetch_text", return_value=raw):
+        with patch.object(api_helpers, "_try_fetch_text_async", AsyncMock(return_value=raw)):
             result = asyncio.run(api_helpers._fetch_lookup_source_entry(spec, "tldr", preferred_language="en"))
 
         self.assertEqual(result["preview"], "English · Phrase\n- Alternative form of tl;dr.")
@@ -519,7 +601,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            response.get_json(),
+            response.json(),
             {"suggestions": [{"surface": "美食", "reading": "měi shí", "lang": "zh"}]},
         )
         fake_local.search.assert_called_once_with("meishi", preferred_language="zh", limit=3)
@@ -540,7 +622,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            response.get_json(),
+            response.json(),
             {"suggestions": ["food", "business card", "noun"]},
         )
 
@@ -600,7 +682,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.get_json(), {"suggestions": []})
+        self.assertEqual(response.json(), {"suggestions": []})
 
     def test_generate_sentence_requires_two_words(self):
         response = self.client.post(
@@ -613,7 +695,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.get_json(), {"error": "Not enough words provided."})
+        self.assertEqual(response.json(), {"error": "Not enough words provided."})
 
     def test_generate_sentence_rejects_unknown_model(self):
         response = self.client.post(
@@ -626,7 +708,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.get_json(), {"error": "Model 'unknown-model' not supported."})
+        self.assertEqual(response.json(), {"error": "Model 'unknown-model' not supported."})
 
     def test_generate_sentence_applies_model_params_and_expands_json_schema(self):
         fake_create = AsyncMock(return_value=make_chat_response('{"usedWords":["apple"],"content":{"zh":{"text":"??","pronunciation":"p?ng gu?"},"en":{"text":"apple","pronunciation":"/??p.?l/"},"ja":{"text":"???","pronunciation":"???"}}}'))
@@ -635,6 +717,16 @@ class ApiEndpointsTestCase(unittest.TestCase):
 
         with (
             patch.object(api_app, "_client_for_model", return_value=fake_client),
+            patch.dict(
+                api_app.MODELS,
+                {model_id: "DeepSeek V3 0324"},
+                clear=False,
+            ),
+            patch.dict(
+                api_app.MODEL_PROVIDERS,
+                {model_id: "default"},
+                clear=False,
+            ),
             patch.dict(
                 api_app.MODEL_PARAMS,
                 {

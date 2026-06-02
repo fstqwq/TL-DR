@@ -1,12 +1,15 @@
 import asyncio
+import copy
 import json
 import logging
 import re
+import threading
 import time
+from collections import OrderedDict
 from functools import lru_cache
 from urllib.parse import quote
 
-import cloudscraper
+import httpx
 from bs4 import BeautifulSoup
 from openai import AsyncOpenAI
 
@@ -16,6 +19,17 @@ LOOKUP_SOURCES_TIMEOUT_SECONDS = 2.0
 MAX_SOURCE_CHARS = 1200
 MAX_TOTAL_CHARS = 3200
 MAX_RAW_SOURCE_CHARS = 4000
+REMOTE_LOOKUP_CACHE_SIZE = 128
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
+HTTP_HEADERS = {
+    "User-Agent": BROWSER_USER_AGENT,
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 WIKTIONARY_LANGUAGE_BY_CODE = {
     "en": "English",
     "zh": "Chinese",
@@ -165,11 +179,57 @@ def parse_autocomplete_suggestions(text: str):
     return suggestions
 
 
-def _http_get_text(url: str, source: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> str:
+_ASYNC_HTTP_CLIENTS: dict[str, httpx.AsyncClient] = {}
+_REMOTE_LOOKUP_CACHE: OrderedDict[tuple[str, str], dict[str, object]] = OrderedDict()
+_REMOTE_LOOKUP_CACHE_LOCK = threading.Lock()
+
+
+def _http_timeout(timeout: float) -> httpx.Timeout:
+    return httpx.Timeout(
+        timeout=max(timeout, 0.1),
+        connect=min(max(timeout, 0.1), 1.0),
+        read=max(timeout, 0.1),
+        write=1.0,
+        pool=1.0,
+    )
+
+
+def _http_client(source: str) -> httpx.AsyncClient:
+    source_id = str(source or "default")
+    client = _ASYNC_HTTP_CLIENTS.get(source_id)
+    if client is not None:
+        return client
+
+    client = httpx.AsyncClient(
+        http2=source_id == "wiktionary",
+        headers=HTTP_HEADERS,
+        follow_redirects=True,
+        limits=httpx.Limits(max_connections=16, max_keepalive_connections=8, keepalive_expiry=30.0),
+    )
+    _ASYNC_HTTP_CLIENTS[source_id] = client
+    return client
+
+
+async def close_http_clients() -> None:
+    clients = list(_ASYNC_HTTP_CLIENTS.values())
+    _ASYNC_HTTP_CLIENTS.clear()
+    for client in clients:
+        await client.aclose()
+
+
+def _response_text(response: httpx.Response) -> str:
+    content_type = str(response.headers.get("content-type", "")).lower()
+    if "application/json" in content_type:
+        response.encoding = "utf-8"
+    elif not response.encoding:
+        response.encoding = response.charset_encoding or "utf-8"
+    return response.text or ""
+
+
+async def _http_get_text_async(url: str, source: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> str:
     started_at = time.perf_counter()
     logger.info("api_helper_request_start source=%s url=%s timeout=%.2fs", source, url, timeout)
-    scraper = cloudscraper.create_scraper()
-    response = scraper.get(url, timeout=timeout)
+    response = await _http_client(source).get(url, timeout=_http_timeout(timeout))
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     logger.info(
         "api_helper_request_end source=%s status=%s elapsed_ms=%.1f",
@@ -180,12 +240,30 @@ def _http_get_text(url: str, source: str, timeout: float = HTTP_TIMEOUT_SECONDS)
     if response.status_code != 200:
         logger.warning("api_helper_request_non_200 source=%s status=%s", source, response.status_code)
         return ""
-    content_type = str(response.headers.get("content-type", "")).lower()
-    if "application/json" in content_type:
-        response.encoding = "utf-8"
-    elif not response.encoding:
-        response.encoding = response.apparent_encoding or "utf-8"
-    return response.text or ""
+    return _response_text(response)
+
+
+def _http_get_text(url: str, source: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> str:
+    started_at = time.perf_counter()
+    logger.info("api_helper_request_start source=%s url=%s timeout=%.2fs", source, url, timeout)
+    with httpx.Client(
+        http2=source == "wiktionary",
+        headers=HTTP_HEADERS,
+        follow_redirects=True,
+        timeout=_http_timeout(timeout),
+    ) as client:
+        response = client.get(url)
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    logger.info(
+        "api_helper_request_end source=%s status=%s elapsed_ms=%.1f",
+        source,
+        response.status_code,
+        elapsed_ms,
+    )
+    if response.status_code != 200:
+        logger.warning("api_helper_request_non_200 source=%s status=%s", source, response.status_code)
+        return ""
+    return _response_text(response)
 
 
 def _format_wiktionary_preview(text: str, preferred_language: str = "auto") -> str:
@@ -517,6 +595,14 @@ def _try_fetch_text(url: str, source: str, timeout: float = HTTP_TIMEOUT_SECONDS
         return ""
 
 
+async def _try_fetch_text_async(url: str, source: str, timeout: float = HTTP_TIMEOUT_SECONDS) -> str:
+    try:
+        return await _http_get_text_async(url, source=source, timeout=timeout)
+    except Exception:
+        logger.error("api_helper_request_failed source=%s url=%s", source, url)
+        return ""
+
+
 LOOKUP_SOURCE_SPECS = (
     {
         "id": "dictionaryapi",
@@ -548,6 +634,50 @@ LOOKUP_SOURCE_SPECS = (
     },
 )
 
+PRECONNECT_WORDS = {
+    "dictionaryapi": "apple",
+    "jisho": "ramen",
+    "wiktionary": "apple",
+    "weblio": "夏休み",
+}
+
+
+async def _preconnect_lookup_source(spec: dict[str, object]) -> tuple[str, dict[str, object]]:
+    source_id = str(spec["id"])
+    word = PRECONNECT_WORDS.get(source_id, "apple")
+    fetch_url = spec["fetch_url"](word)
+    started_at = time.perf_counter()
+    try:
+        response = await _http_client(source_id).get(fetch_url, timeout=_http_timeout(HTTP_TIMEOUT_SECONDS))
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        return source_id, {
+            "status": response.status_code,
+            "elapsedMs": round(elapsed_ms, 1),
+        }
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        logger.warning("preconnect_source_failed source=%s elapsed_ms=%.1f error=%s", source_id, elapsed_ms, exc)
+        return source_id, {
+            "error": str(exc),
+            "elapsedMs": round(elapsed_ms, 1),
+        }
+
+
+async def preconnect_lookup_sources() -> dict[str, dict[str, object]]:
+    results = await asyncio.gather(
+        *(_preconnect_lookup_source(spec) for spec in LOOKUP_SOURCE_SPECS),
+        return_exceptions=True,
+    )
+    payload: dict[str, dict[str, object]] = {}
+    for index, result in enumerate(results):
+        if isinstance(result, Exception):
+            source_id = str(LOOKUP_SOURCE_SPECS[index]["id"])
+            payload[source_id] = {"error": str(result)}
+            continue
+        source_id, source_payload = result
+        payload[source_id] = source_payload
+    return payload
+
 
 async def _fetch_lookup_source_entry(
     spec: dict[str, object],
@@ -556,7 +686,7 @@ async def _fetch_lookup_source_entry(
 ) -> dict[str, object]:
     source_id = str(spec["id"])
     fetch_url = spec["fetch_url"](word)
-    raw = await asyncio.to_thread(_try_fetch_text, fetch_url, source_id)
+    raw = await _try_fetch_text_async(fetch_url, source_id)
     formatter = spec["formatter"]
     if callable(formatter) and source_id == "wiktionary":
         snippet = formatter(raw, preferred_language=preferred_language)
@@ -691,6 +821,30 @@ def _lookupdictionary_remote_bundle(word: str, preferred_language: str = "auto")
         loop.close()
 
 
+async def _lookupdictionary_remote_bundle_async(word: str, preferred_language: str = "auto") -> dict[str, object]:
+    query = word.strip() if isinstance(word, str) else ""
+    if not query:
+        return {"augmented_content": "", "sources": []}
+    normalized_language = preferred_language if preferred_language in {"en", "zh", "ja"} else "auto"
+    cache_key = (query, normalized_language)
+
+    with _REMOTE_LOOKUP_CACHE_LOCK:
+        cached = _REMOTE_LOOKUP_CACHE.get(cache_key)
+        if cached is not None:
+            _REMOTE_LOOKUP_CACHE.move_to_end(cache_key)
+            return copy.deepcopy(cached)
+
+    result = await _lookupdictionary_async(query, preferred_language=normalized_language)
+
+    with _REMOTE_LOOKUP_CACHE_LOCK:
+        _REMOTE_LOOKUP_CACHE[cache_key] = copy.deepcopy(result)
+        _REMOTE_LOOKUP_CACHE.move_to_end(cache_key)
+        while len(_REMOTE_LOOKUP_CACHE) > REMOTE_LOOKUP_CACHE_SIZE:
+            _REMOTE_LOOKUP_CACHE.popitem(last=False)
+
+    return result
+
+
 def lookupdictionary_bundle(
     word: str,
     local_autocomplete=None,
@@ -702,6 +856,31 @@ def lookupdictionary_bundle(
 
     normalized_language = preferred_language if preferred_language in {"en", "zh", "ja"} else "auto"
     remote_bundle = _lookupdictionary_remote_bundle(query, normalized_language)
+    local_bundle = _local_lookup_bundle(query, local_autocomplete)
+
+    local_sources = local_bundle.get("sources", [])
+    remote_sources = remote_bundle.get("sources", [])
+    local_content = str(local_bundle.get("augmented_content", "")).strip()
+    remote_content = str(remote_bundle.get("augmented_content", "")).strip()
+    parts = [part for part in (local_content, remote_content) if part]
+
+    return {
+        "augmented_content": "\n\n".join(parts)[:MAX_TOTAL_CHARS] if parts else "",
+        "sources": [*local_sources, *remote_sources],
+    }
+
+
+async def async_lookupdictionary_bundle(
+    word: str,
+    local_autocomplete=None,
+    preferred_language: str = "auto",
+) -> dict[str, object]:
+    query = word.strip() if isinstance(word, str) else ""
+    if not query:
+        return {"augmented_content": "", "sources": []}
+
+    normalized_language = preferred_language if preferred_language in {"en", "zh", "ja"} else "auto"
+    remote_bundle = await _lookupdictionary_remote_bundle_async(query, normalized_language)
     local_bundle = _local_lookup_bundle(query, local_autocomplete)
 
     local_sources = local_bundle.get("sources", [])

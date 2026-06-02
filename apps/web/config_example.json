@@ -1,5 +1,5 @@
 {
-  "BACKEND_URL": "http://api.your.domain/",
+  "BACKEND_URL": "/",
   "MODELS": [
     {
       "id": "https://clarifai.com/openai/chat-completion/models/gpt-oss-120b/versions/770a9a1af221402dac8977b0186f4604",

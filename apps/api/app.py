@@ -1,21 +1,26 @@
-import asyncio
 import copy
 import json
 import logging
 import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+from json import JSONDecodeError
+from typing import Deque
 
-from flask import Flask, Response, jsonify, request, stream_with_context
-from flask_cors import CORS
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
 
 try:
     from .api_helpers import (
+        async_lookupdictionary_bundle,
+        close_http_clients,
         create_openai_clients,
-        lookupdictionary_bundle,
         parse_autocomplete_suggestions,
+        preconnect_lookup_sources,
         safe_json,
     )
     from .local_autocomplete import LocalAutocomplete
-    from .limiter_setup import attach_global_limiter
     from .llm_payloads import (
         AUTOCOMPLETE_PROMPT,
         DICTIONARY_SCHEMA,
@@ -33,17 +38,17 @@ try:
         MODEL_PROVIDERS,
         MODELS,
         PROVIDER_CONFIGS,
-        RATE_LIMIT_STORAGE_URI,
     )
 except ImportError:
     from api_helpers import (
+        async_lookupdictionary_bundle,
+        close_http_clients,
         create_openai_clients,
-        lookupdictionary_bundle,
         parse_autocomplete_suggestions,
+        preconnect_lookup_sources,
         safe_json,
     )
     from local_autocomplete import LocalAutocomplete
-    from limiter_setup import attach_global_limiter
     from llm_payloads import (
         AUTOCOMPLETE_PROMPT,
         DICTIONARY_SCHEMA,
@@ -61,7 +66,6 @@ except ImportError:
         MODEL_PROVIDERS,
         MODELS,
         PROVIDER_CONFIGS,
-        RATE_LIMIT_STORAGE_URI,
     )
 
 logging.basicConfig(
@@ -70,18 +74,35 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-
-app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend requests
-main_limit, autocomplete_limit = attach_global_limiter(
-    app,
-    storage_uri=RATE_LIMIT_STORAGE_URI,
-    main_limit_per_minute=MAIN_RATE_LIMIT_PER_MINUTE,
-    autocomplete_limit_per_minute=AUTOCOMPLETE_RATE_LIMIT_PER_MINUTE,
-)
 PROVIDER_CLIENTS = create_openai_clients(PROVIDER_CONFIGS)
 LOCAL_AUTOCOMPLETE = LocalAutocomplete(AUTOCOMPLETE_INDEX_PATH)
 MAX_AUTOCOMPLETE_INPUT_LENGTH = 128
+
+_RATE_LIMIT_BUCKETS: dict[str, Deque[float]] = defaultdict(deque)
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    started = time.perf_counter()
+    loaded = LOCAL_AUTOCOMPLETE.preload()
+    logging.info(
+        "local_autocomplete_preload_complete loaded=%s elapsed_ms=%.1f",
+        loaded,
+        (time.perf_counter() - started) * 1000,
+    )
+    try:
+        yield
+    finally:
+        await close_http_clients()
+
+
+app = FastAPI(lifespan=_lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _sse_event(name: str, payload: object) -> str:
@@ -168,64 +189,80 @@ def _model_request_params(model: str, endpoint: str, *, include_response_format:
     return params
 
 
-def _parse_autocomplete_request():
-    data = request.json or {}
-    timestamp = data.get("timestamp", 0)
-    if abs(time.time() - timestamp / 1000) > 15:
-        return None, jsonify({"error": "Invalid request."}), 403
+async def _request_json(request: Request) -> dict:
+    try:
+        data = await request.json()
+    except (JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
-    partial_input = (data.get("partialInput") or data.get("partial_input") or "").strip()
-    preferred_language = data.get("preferredLanguage", "auto")
-    return {
-        "partial_input": partial_input,
-        "preferred_language": preferred_language,
-    }, None, None
+
+def _timestamp_is_valid(timestamp: object) -> bool:
+    if not isinstance(timestamp, (int, float)):
+        return False
+    return abs(time.time() - timestamp / 1000) <= 15
+
+
+def _rate_limit_response(scope: str, limit_per_minute: int) -> JSONResponse | None:
+    now = time.monotonic()
+    bucket = _RATE_LIMIT_BUCKETS[scope]
+    while bucket and now - bucket[0] > 60:
+        bucket.popleft()
+    if len(bucket) >= limit_per_minute:
+        return JSONResponse({"error": "Rate limit exceeded."}, status_code=429)
+    bucket.append(now)
+    return None
 
 
 def _autocomplete_user_content(preferred_language: str, partial_input: str) -> str:
     return (f"Language: {preferred_language}\n" if preferred_language != "auto" else "") + f"Input: {partial_input}"
 
 
-@app.route("/api/lookup", methods=["POST"])
-@main_limit
-def lookup_word():
-    data = request.json or {}
+async def _parse_autocomplete_request(request: Request):
+    data = await _request_json(request)
     timestamp = data.get("timestamp", 0)
-    if abs(time.time() - timestamp / 1000) > 15:
-        return jsonify({"error": "Invalid request."}), 403
+    if not _timestamp_is_valid(timestamp):
+        return None, JSONResponse({"error": "Invalid request."}, status_code=403)
+
+    partial_input = (data.get("partialInput") or data.get("partial_input") or "").strip()
+    preferred_language = data.get("preferredLanguage", "auto")
+    return {
+        "partial_input": partial_input,
+        "preferred_language": preferred_language,
+    }, None
+
+
+@app.post("/api/lookup")
+async def lookup_word(request: Request):
+    limited = _rate_limit_response("main", MAIN_RATE_LIMIT_PER_MINUTE)
+    if limited is not None:
+        return limited
+
+    data = await _request_json(request)
+    timestamp = data.get("timestamp", 0)
+    if not _timestamp_is_valid(timestamp):
+        return JSONResponse({"error": "Invalid request."}, status_code=403)
+
     query = data.get("query")
     model = data.get("model")
     preferred_language = data.get("preferredLanguage", "auto")
     query = query.strip() if isinstance(query, str) else ""
     if not query:
         logging.warning("lookup_missing_query")
-        return jsonify({"error": "No query provided"}), 400
+        return JSONResponse({"error": "No query provided"}, status_code=400)
     if model not in MODELS:
         logging.warning("lookup_unsupported_model model=%s", model)
-        return jsonify({"error": f"Model '{model}' not supported."}), 400
+        return JSONResponse({"error": f"Model '{model}' not supported."}, status_code=400)
 
     client = _client_for_model(model)
 
-    @stream_with_context
-    def generate():
-        async def fetch_lookup_result() -> object:
-            request_kwargs = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": lookup_system_content()},
-                    {"role": "user", "content": lookup_user_content(query, preferred_language, augmented_content)},
-                ],
-            }
-            request_kwargs.update(_model_request_params(model, "lookup"))
-            request_kwargs["temperature"] = 0.1
-            return await client.chat.completions.create(**request_kwargs)
-
+    async def generate():
         try:
             yield _sse_event(
                 "progress",
                 {"stage": "augment", "message": "Collecting dictionary context"},
             )
-            lookup_bundle = lookupdictionary_bundle(
+            lookup_bundle = await async_lookupdictionary_bundle(
                 query,
                 local_autocomplete=LOCAL_AUTOCOMPLETE,
                 preferred_language=preferred_language,
@@ -245,7 +282,16 @@ def lookup_word():
                 "progress",
                 {"stage": "generate", "message": "Generating dictionary entry"},
             )
-            response = asyncio.run(fetch_lookup_result())
+            request_kwargs = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": lookup_system_content()},
+                    {"role": "user", "content": lookup_user_content(query, preferred_language, augmented_content)},
+                ],
+            }
+            request_kwargs.update(_model_request_params(model, "lookup"))
+            request_kwargs["temperature"] = 0.1
+            response = await client.chat.completions.create(**request_kwargs)
 
             content = response.choices[0].message.content
             logging.info("lookup_response_received query=%s content_length=%d", query, len(content or ""))
@@ -254,9 +300,9 @@ def lookup_word():
             logging.exception("lookup_generate_failed query=%s", query)
             yield _sse_event("error", {"stage": "generate", "message": str(exc)})
 
-    return Response(
+    return StreamingResponse(
         generate(),
-        mimetype="text/event-stream",
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -265,12 +311,27 @@ def lookup_word():
     )
 
 
-@app.route("/api/autocomplete/local", methods=["POST"])
-@autocomplete_limit
-def autocomplete_local():
-    parsed, error_response, status_code = _parse_autocomplete_request()
+@app.post("/api/preconnect")
+async def preconnect(request: Request):
+    limited = _rate_limit_response("preconnect", AUTOCOMPLETE_RATE_LIMIT_PER_MINUTE)
+    if limited is not None:
+        return limited
+
+    # The request body is intentionally ignored. Preconnect always warms every
+    # configured remote source so frontend callers do not need source policy.
+    await _request_json(request)
+    return JSONResponse({"ok": True, "sources": await preconnect_lookup_sources()})
+
+
+@app.post("/api/autocomplete/local")
+async def autocomplete_local(request: Request):
+    limited = _rate_limit_response("autocomplete", AUTOCOMPLETE_RATE_LIMIT_PER_MINUTE)
+    if limited is not None:
+        return limited
+
+    parsed, error_response = await _parse_autocomplete_request(request)
     if error_response is not None:
-        return error_response, status_code
+        return error_response
 
     partial_input = parsed["partial_input"]
     preferred_language = parsed["preferred_language"]
@@ -281,9 +342,9 @@ def autocomplete_local():
     )
 
     if not partial_input:
-        return jsonify({"suggestions": []})
+        return JSONResponse({"suggestions": []})
     if len(partial_input) > MAX_AUTOCOMPLETE_INPUT_LENGTH:
-        return jsonify({"suggestions": []}), 400
+        return JSONResponse({"suggestions": []}, status_code=400)
 
     try:
         suggestions = LOCAL_AUTOCOMPLETE.search(
@@ -293,17 +354,20 @@ def autocomplete_local():
         )
     except Exception as exc:
         logging.exception("local_autocomplete_failed query=%s", partial_input)
-        return jsonify({"error": str(exc)}), 500
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
-    return jsonify({"suggestions": suggestions})
+    return JSONResponse({"suggestions": suggestions})
 
 
-@app.route("/api/autocomplete/llm", methods=["POST"])
-@autocomplete_limit
-def autocomplete_llm():
-    parsed, error_response, status_code = _parse_autocomplete_request()
+@app.post("/api/autocomplete/llm")
+async def autocomplete_llm(request: Request):
+    limited = _rate_limit_response("autocomplete", AUTOCOMPLETE_RATE_LIMIT_PER_MINUTE)
+    if limited is not None:
+        return limited
+
+    parsed, error_response = await _parse_autocomplete_request(request)
     if error_response is not None:
-        return error_response, status_code
+        return error_response
 
     partial_input = parsed["partial_input"]
     preferred_language = parsed["preferred_language"]
@@ -314,11 +378,11 @@ def autocomplete_llm():
     )
 
     if not partial_input:
-        return jsonify({"suggestions": []})
+        return JSONResponse({"suggestions": []})
 
     client = _client_for_model(FAST_MODEL)
 
-    async def fetch_api_suggestions() -> list[str]:
+    try:
         request_kwargs = {
             "model": FAST_MODEL,
             "messages": [
@@ -331,57 +395,49 @@ def autocomplete_llm():
         request_kwargs["max_tokens"] = 32
         response = await client.chat.completions.create(**request_kwargs)
         content = response.choices[0].message.content or ""
-        return parse_autocomplete_suggestions(content)
-
-    try:
-        suggestions = asyncio.run(fetch_api_suggestions())
+        suggestions = parse_autocomplete_suggestions(content)
     except Exception as exc:
         logging.exception("api_autocomplete_failed query=%s", partial_input)
-        return jsonify({"error": str(exc)}), 500
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
-    return jsonify({"suggestions": suggestions})
+    return JSONResponse({"suggestions": suggestions})
 
 
-@app.route("/api/generate-sentence", methods=["POST"])
-@main_limit
-def generate_sentence():
-    data = request.json or {}
+@app.post("/api/generate-sentence")
+async def generate_sentence(request: Request):
+    limited = _rate_limit_response("main", MAIN_RATE_LIMIT_PER_MINUTE)
+    if limited is not None:
+        return limited
+
+    data = await _request_json(request)
     timestamp = data.get("timestamp", 0)
-    if abs(time.time() - timestamp / 1000) > 15:
-        return jsonify({"error": "Invalid request."}), 403
+    if not _timestamp_is_valid(timestamp):
+        return JSONResponse({"error": "Invalid request."}, status_code=403)
     words = data.get("words", [])
     model = data.get("model")
 
     if not words or len(words) < 2:
-        return jsonify({"error": "Not enough words provided."}), 400
+        return JSONResponse({"error": "Not enough words provided."}, status_code=400)
     if model not in MODELS:
         logging.warning("generate_sentence_unsupported_model model=%s", model)
-        return jsonify({"error": f"Model '{model}' not supported."}), 400
+        return JSONResponse({"error": f"Model '{model}' not supported."}, status_code=400)
 
     try:
         client = _client_for_model(model)
-
-        async def fetch_sentence_result() -> object:
-            request_kwargs = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": lucky_system_content()},
-                    {"role": "user", "content": f"Input Words: {json.dumps(words, ensure_ascii=False, indent=None)}"},
-                ],
-            }
-            request_kwargs.update(_model_request_params(model, "generate_sentence"))
-            return await client.chat.completions.create(**request_kwargs)
-
-        response = asyncio.run(fetch_sentence_result())
+        request_kwargs = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": lucky_system_content()},
+                {"role": "user", "content": f"Input Words: {json.dumps(words, ensure_ascii=False, indent=None)}"},
+            ],
+        }
+        request_kwargs.update(_model_request_params(model, "generate_sentence"))
+        response = await client.chat.completions.create(**request_kwargs)
 
         content = response.choices[0].message.content
         logging.info("lucky_response_received word_count=%d content_length=%d", len(words), len(content or ""))
-        return jsonify(safe_json(content))
+        return JSONResponse(safe_json(content))
 
-    except Exception as e:
+    except Exception as exc:
         logging.exception("generate_sentence_failed")
-        return jsonify({"error": str(e)}), 500
-
-
-if __name__ == "__main__":
-    app.run(host="127.0.0.1", debug=False, port=5000)
+        return JSONResponse({"error": str(exc)}, status_code=500)

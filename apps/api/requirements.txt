@@ -1,6 +1,5 @@
-flask
-flask-cors
-flask-limiter
+fastapi
+uvicorn[standard]
 openai
-cloudscraper
+httpx[http2]
 bs4

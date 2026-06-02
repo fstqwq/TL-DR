@@ -1,6 +1,6 @@
 # API Backend
 
-The Flask backend for TL;DR. It serves the dictionary lookup API and exposes separate local and LLM autocomplete endpoints.
+The FastAPI/ASGI backend for TL;DR. It serves the dictionary lookup API and exposes separate local and LLM autocomplete endpoints.
 
 ## ⚙️ Configuration
 
@@ -73,10 +73,10 @@ From the repo root:
 ```bash
 export API_KEY="your_api_key"  # for the default sample config
 export RATE_LIMIT="60"      # requests per minute, optional
-python apps/api/app.py
+python -m uvicorn apps.api.app:app --host 127.0.0.1 --port 5000
 ```
 
-You should see `Running on http://127.0.0.1:5000`.
+You should see Uvicorn listening on `http://127.0.0.1:5000`.
 
 If your `providers` config uses a different environment variable name, export that name instead.
 
@@ -87,11 +87,11 @@ If your `providers` config uses a different environment variable name, export th
 | `CONFIG_PATH` | Path to backend config file | `apps/api/config.json` |
 | `API_KEY` | LLM provider API key for the default sample config | — |
 | `RATE_LIMIT` | Max requests per minute | — |
-| `LOCAL_LEXICON_PATH` | Path to local autocomplete index | `apps/api/data/lexicon.json.xz` |
+| `LOCAL_LEXICON_PATH` | Path to local autocomplete index. Set to an empty string to disable local autocomplete. | `apps/api/data/lexicon.json.xz` |
 
 ### Production Deployment
 
-For public deployments, do **not** expose the Flask dev server directly. Use a WSGI server (e.g. Gunicorn) behind a reverse proxy (e.g. Nginx), and consider customizing the authentication logic in `app.py`.
+For public deployments, do **not** expose the ASGI server directly. Use Uvicorn behind a reverse proxy (e.g. Nginx/Caddy). Prefer same-origin routing where the frontend serves `/` and the reverse proxy sends `/api/` to the ASGI backend.
 
 ## 📖 Local Autocomplete
 
@@ -99,7 +99,7 @@ An optional offline dictionary index that provides instant suggestions without a
 
 - **Code:** `local_autocomplete.py`
 - **Generated file:** `data/lexicon.json.xz` (packed pickle + xz; legacy JSON + xz files still load)
-- If the file is missing, the backend still starts — `/api/autocomplete/local` returns an empty list.
+- The backend preloads this index during ASGI startup. If the configured path is missing or invalid, startup fails. Set `LOCAL_LEXICON_PATH=""` to disable local autocomplete intentionally.
 
 Local `zh/ja` dictionary entries are also used to augment `/api/lookup` results when available.
 
@@ -152,6 +152,20 @@ When local dictionary data is available, lookup augmentation includes matching `
 ```text
 surface [reading]
 meaning
+```
+
+### `POST /api/preconnect`
+
+Prewarms outbound HTTP connections to all remote dictionary sources. The request body is ignored. This endpoint is a latency hint only; `/api/lookup` must work without calling it first.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "sources": {
+    "jisho": {"status": 200, "elapsedMs": 210.5}
+  }
+}
 ```
 
 ### `POST /api/autocomplete/local`

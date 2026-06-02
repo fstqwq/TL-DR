@@ -1,6 +1,6 @@
 ﻿import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Search, History, Sparkles, Settings2, Dices, X, HelpCircle, CornerDownLeft, Lightbulb } from 'lucide-react';
-import { lookupWord, generateSentence, setRuntimeConfig, autocompleteLocalWords, autocompleteLlmWords } from './services/llmService';
+import { lookupWord, generateSentence, setRuntimeConfig, autocompleteLocalWords, autocompleteLlmWords, preconnectApi } from './services/llmService';
 import { playAudio } from './services/ttsService';
 import { DictionaryEntry, LuckySentenceResult, WordContext, AppConfig, LookupSource, LocalAutocompleteSuggestion } from './types';
 import { WordCard } from './components/WordCard';
@@ -43,6 +43,7 @@ const AUTOCOMPLETE_API_DEBOUNCE_MS = 350;
 const AUTOCOMPLETE_MIN_CHARS = 2;
 const AUTOCOMPLETE_CJK_MIN_CHARS = 2;
 const AUTOCOMPLETE_CACHE_TTL_MS = 90 * 1000;
+const PRECONNECT_MIN_INTERVAL_MS = 30 * 1000;
 
 const getAutocompleteMinChars = (value: string) =>
   /[\u3040-\u30ff\u3400-\u9fff]/.test(value) ? AUTOCOMPLETE_CJK_MIN_CHARS : AUTOCOMPLETE_MIN_CHARS;
@@ -207,6 +208,8 @@ function App({ config }: AppProps) {
   const autocompleteApiInFlightRef = useRef<Map<string, AutocompleteInFlightEntry>>(new Map());
   const autocompleteSuggestionsRef = useRef<AutocompleteSuggestionItem[]>([]);
   const autocompleteSourceQueryRef = useRef<string | null>(null);
+  const preconnectAbortRef = useRef<AbortController | null>(null);
+  const lastPreconnectAtRef = useRef(0);
   const latestQueryRef = useRef('');
   const latestPreferredLangRef = useRef<PreferredLanguage>('auto');
   const lookupAbortRef = useRef<AbortController | null>(null);
@@ -243,7 +246,29 @@ function App({ config }: AppProps) {
     autocompleteApiInFlightRef.current.clear();
     syncAutocompleteLoading();
   }, [syncAutocompleteLoading]);
-  
+
+  const preconnectDictionaries = useCallback(() => {
+    const now = Date.now();
+    if (preconnectAbortRef.current || now - lastPreconnectAtRef.current < PRECONNECT_MIN_INTERVAL_MS) {
+      return;
+    }
+    lastPreconnectAtRef.current = now;
+    const controller = new AbortController();
+    preconnectAbortRef.current = controller;
+
+    void preconnectApi(controller.signal)
+      .catch((error: any) => {
+        if (error?.name !== 'AbortError') {
+          console.warn('Dictionary preconnect failed:', error?.message || error);
+        }
+      })
+      .finally(() => {
+        if (preconnectAbortRef.current === controller) {
+          preconnectAbortRef.current = null;
+        }
+      });
+  }, []);
+
   // Initialize models from local storage, but validate against the current CONFIG
   // If the stored model ID no longer exists in config, fall back to the first available model.
   const [searchModel, setSearchModel] = useState<string>(() => {
@@ -398,6 +423,7 @@ function App({ config }: AppProps) {
       }
       clearAutocompleteTimers();
       abortAutocompleteRequests();
+      preconnectAbortRef.current?.abort();
       lookupAbortRef.current?.abort();
     };
   }, [abortAutocompleteRequests, clearAutocompleteTimers]);
@@ -540,6 +566,8 @@ function App({ config }: AppProps) {
       return;
     }
 
+    preconnectDictionaries();
+
     for (const inFlightRequests of [autocompleteLocalInFlightRef.current, autocompleteApiInFlightRef.current]) {
       for (const [requestKey, request] of inFlightRequests.entries()) {
         if (request.language !== preferredLang || !areAutocompleteQueriesConsistent(request.query, trimmed)) {
@@ -644,7 +672,7 @@ function App({ config }: AppProps) {
     return () => {
       clearAutocompleteTimers();
     };
-  }, [query, searchModel, preferredLang, abortAutocompleteRequests, clearAutocompleteTimers, syncAutocompleteLoading]);
+  }, [query, searchModel, preferredLang, abortAutocompleteRequests, clearAutocompleteTimers, preconnectDictionaries, syncAutocompleteLoading]);
 
   const applySuggestion = useCallback((suggestion: string) => {
     handleSearch(undefined, suggestion);
@@ -681,6 +709,7 @@ function App({ config }: AppProps) {
 
   const handleQueryFocus = useCallback(() => {
     setIsAutocompleteOpen(true);
+    preconnectDictionaries();
     const trimmed = query.trim();
     const minChars = getAutocompleteMinChars(trimmed);
     if (trimmed.length < minChars) return;
@@ -694,7 +723,7 @@ function App({ config }: AppProps) {
       setActiveSuggestionIndex(-1);
       return;
     }
-  }, [query, preferredLang]);
+  }, [query, preferredLang, preconnectDictionaries]);
 
   const handleQueryBlur = useCallback(() => {
     setIsAutocompleteOpen(false);

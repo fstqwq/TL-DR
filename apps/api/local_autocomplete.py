@@ -863,6 +863,12 @@ class LocalAutocomplete:
         self._index: IndexLike | None = None
         self._load_attempted = False
 
+    def preload(self) -> bool:
+        if self.index_path is None:
+            logger.info("local_autocomplete_index_disabled")
+            return False
+        return self._ensure_index(raise_on_failure=True) is not None
+
     def search(self, query: str, preferred_language: str = "auto", limit: int = 3) -> list[dict[str, str]]:
         normalized_query = query.strip() if isinstance(query, str) else ""
         if not normalized_query:
@@ -899,19 +905,25 @@ class LocalAutocomplete:
             if isinstance(lang, str) and isinstance(provider, str)
         }
 
-    def _ensure_index(self) -> IndexLike | None:
+    def _ensure_index(self, *, raise_on_failure: bool = False) -> IndexLike | None:
         if self._index is not None:
             return self._index
         if self._load_attempted:
+            if raise_on_failure:
+                raise RuntimeError(f"Local autocomplete index is unavailable: {self.index_path}")
             return None
         with self._lock:
             if self._index is not None:
                 return self._index
             if self._load_attempted:
+                if raise_on_failure:
+                    raise RuntimeError(f"Local autocomplete index is unavailable: {self.index_path}")
                 return None
             self._load_attempted = True
             if self.index_path is None or not self.index_path.exists():
                 logger.info("local_autocomplete_index_missing path=%s", self.index_path)
+                if raise_on_failure:
+                    raise FileNotFoundError(f"Local autocomplete index is missing: {self.index_path}")
                 return None
             try:
                 self._index = load_compact_index(self.index_path)
@@ -921,7 +933,9 @@ class LocalAutocomplete:
                     len(self._index.aliases),
                     self._index.entry_count if isinstance(self._index, PackedIndex) else len(self._index.entries),
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception("local_autocomplete_index_failed path=%s", self.index_path)
                 self._index = None
+                if raise_on_failure:
+                    raise RuntimeError(f"Failed to load local autocomplete index: {self.index_path}") from exc
             return self._index
