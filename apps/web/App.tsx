@@ -10,7 +10,7 @@ import { PopQuizCard } from './components/PopQuizCard';
 import { LookupSources } from './components/LookupSources';
 
 type PreferredLanguage = 'auto' | 'zh' | 'en' | 'ja';
-type AppProps = { config: AppConfig };
+type AppProps = { config: AppConfig; configLoaded: boolean };
 type AutocompleteCacheEntry = {
   localSuggestions: LocalAutocompleteSuggestion[];
   apiSuggestions: string[];
@@ -189,10 +189,14 @@ const DEFAULT_MODELS = [
 ];
 
 // Load models from Runtime Config
-function App({ config }: AppProps) {
+function App({ config, configLoaded }: AppProps) {
   const models = useMemo(
     () => (config.MODELS && config.MODELS.length > 0 ? config.MODELS : DEFAULT_MODELS),
     [config]
+  );
+  const modelExists = useCallback(
+    (modelId: string | null) => !!modelId && models.some(model => model.id === modelId),
+    [models]
   );
   const [query, setQuery] = useState('');
   const [preferredLang, setPreferredLang] = useState<PreferredLanguage>('auto');
@@ -273,24 +277,35 @@ function App({ config }: AppProps) {
   // If the stored model ID no longer exists in config, fall back to the first available model.
   const [searchModel, setSearchModel] = useState<string>(() => {
     const stored = localStorage.getItem('search_model');
-    const exists = models.find(m => m.id === stored);
-    return exists ? stored! : models[0].id;
+    return stored || models[0].id;
   });
 
   const [luckyModel, setLuckyModel] = useState<string>(() => {
     const stored = localStorage.getItem('lucky_model');
-    const exists = models.find(m => m.id === stored);
-    return exists ? stored! : models[0].id;
+    return stored || models[0].id;
   });
 
   useEffect(() => {
-    if (!models.some(model => model.id === searchModel)) {
-      setSearchModel(models[0].id);
-    }
-    if (!models.some(model => model.id === luckyModel)) {
-      setLuckyModel(models[0].id);
-    }
-  }, [models, searchModel, luckyModel]);
+    if (!configLoaded) return;
+
+    const storedSearchModel = localStorage.getItem('search_model');
+    const storedLuckyModel = localStorage.getItem('lucky_model');
+
+    setSearchModel(current => (
+      modelExists(current)
+        ? current
+        : modelExists(storedSearchModel)
+          ? storedSearchModel!
+          : models[0].id
+    ));
+    setLuckyModel(current => (
+      modelExists(current)
+        ? current
+        : modelExists(storedLuckyModel)
+          ? storedLuckyModel!
+          : models[0].id
+    ));
+  }, [configLoaded, modelExists, models]);
   
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
@@ -407,9 +422,14 @@ function App({ config }: AppProps) {
 
   // Save model preferences
   useEffect(() => {
-    localStorage.setItem('search_model', searchModel);
-    localStorage.setItem('lucky_model', luckyModel);
-  }, [searchModel, luckyModel]);
+    if (!configLoaded) return;
+    if (modelExists(searchModel)) {
+      localStorage.setItem('search_model', searchModel);
+    }
+    if (modelExists(luckyModel)) {
+      localStorage.setItem('lucky_model', luckyModel);
+    }
+  }, [configLoaded, luckyModel, modelExists, searchModel]);
 
   // Provide runtime config to llmService (backend URL, etc.)
   useEffect(() => {

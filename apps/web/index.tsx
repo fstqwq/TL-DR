@@ -64,18 +64,22 @@ const fetchRuntimeConfig = async (): Promise<AppConfig | null> => {
 
 function BootstrapApp() {
   const [config, setConfig] = useState<AppConfig>({});
+  const [configLoaded, setConfigLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
       const latestConfig = await fetchRuntimeConfig();
-      if (!latestConfig || cancelled) return;
+      if (cancelled) return;
 
       startTransition(() => {
-        setConfig((currentConfig) => (
-          configsEqual(currentConfig, latestConfig) ? currentConfig : latestConfig
-        ));
+        if (latestConfig) {
+          setConfig((currentConfig) => (
+            configsEqual(currentConfig, latestConfig) ? currentConfig : latestConfig
+          ));
+        }
+        setConfigLoaded(true);
       });
     })();
 
@@ -86,7 +90,7 @@ function BootstrapApp() {
 
   return (
     <React.StrictMode>
-      <App config={config} />
+      <App config={config} configLoaded={configLoaded} />
     </React.StrictMode>
   );
 }
