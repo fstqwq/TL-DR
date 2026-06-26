@@ -13,6 +13,7 @@ DICTIONARY_SCHEMA = {
             "enum": ["zh", "en", "ja", "unknown"],
             "description": "The detected source language of the query.",
         },
+        "partsOfSpeech": {"type": "array", "description": "Part(s) of speech of targetWord in detectedLanguage. Use only lowercase English labels from the enum. Order by common dictionary usage. Return [] if unknown.", "items": {"type": "string", "enum": ["noun", "proper noun", "verb", "adjective", "adverb", "pronoun", "preposition", "conjunction", "interjection", "particle", "determiner", "numeral", "counter", "prefix", "suffix", "phrase", "proverb", "expression"]}},
         "origin": {
             "type": ["string", "null"],
             "description": "If the target word is a Japanese Katakana loanword (Gairaigo), provide the original Western word (e.g. '(English) Television' for 'テレビ'). Otherwise return null.",
@@ -75,7 +76,7 @@ DICTIONARY_SCHEMA = {
             },
         },
     },
-    "required": ["targetWord", "detectedLanguage", "definitions", "translations", "synonyms", "antonyms"],
+    "required": ["targetWord", "detectedLanguage", "partsOfSpeech", "definitions", "translations", "synonyms", "antonyms"],
 }
 
 LOOKUP_SYSTEM_PROMPT = """You are a smart trilingual dictionary assistant.
@@ -87,6 +88,9 @@ Step 1: Auto-Correction & Fuzzy Matching
 
 Step 2: Analysis
 - Identify the language (Chinese, English, or Japanese). If the preferred language is specified (not 'auto'), try to interpret the query in that context. Only if it is clearly from another language, mark it as such.
+- Return "partsOfSpeech" for the "targetWord" in the detected source language, not for its translations.
+- Use concise lowercase English labels from the schema enum.
+- If multiple labels apply, order by common dictionary usage and remove duplicates. If unknown, return [].
 - If the word is a Japanese Katakana loanword (Gairaigo), identify the original Western word and put it in the 'origin' field.
 - Provide the definition/translation for ALL THREE languages. Be as accurate as dictinary entries, and as concise as possible.
 - Provide the EQUIVALENT WORD and PRONUNCIATION for ALL THREE languages in the 'translations' object.

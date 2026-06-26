@@ -77,6 +77,26 @@ logging.basicConfig(
 PROVIDER_CLIENTS = create_openai_clients(PROVIDER_CONFIGS)
 LOCAL_AUTOCOMPLETE = LocalAutocomplete(AUTOCOMPLETE_INDEX_PATH)
 MAX_AUTOCOMPLETE_INPUT_LENGTH = 128
+ALLOWED_PARTS_OF_SPEECH = {
+    "noun",
+    "proper noun",
+    "verb",
+    "adjective",
+    "adverb",
+    "pronoun",
+    "preposition",
+    "conjunction",
+    "interjection",
+    "particle",
+    "determiner",
+    "numeral",
+    "counter",
+    "prefix",
+    "suffix",
+    "phrase",
+    "proverb",
+    "expression",
+}
 
 _RATE_LIMIT_BUCKETS: dict[str, Deque[float]] = defaultdict(deque)
 
@@ -218,6 +238,30 @@ def _autocomplete_user_content(preferred_language: str, partial_input: str) -> s
     return (f"Language: {preferred_language}\n" if preferred_language != "auto" else "") + f"Input: {partial_input}"
 
 
+def _normalize_parts_of_speech(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        label = " ".join(item.strip().lower().split())
+        if label not in ALLOWED_PARTS_OF_SPEECH or label in seen:
+            continue
+        seen.add(label)
+        normalized.append(label)
+    return normalized
+
+
+def _normalize_lookup_result(payload: object) -> dict:
+    result = payload if isinstance(payload, dict) else {}
+    normalized = dict(result)
+    normalized["partsOfSpeech"] = _normalize_parts_of_speech(normalized.get("partsOfSpeech"))
+    return normalized
+
+
 async def _parse_autocomplete_request(request: Request):
     data = await _request_json(request)
     timestamp = data.get("timestamp", 0)
@@ -295,7 +339,7 @@ async def lookup_word(request: Request):
 
             content = response.choices[0].message.content
             logging.info("lookup_response_received query=%s content_length=%d", query, len(content or ""))
-            yield _sse_event("result", safe_json(content))
+            yield _sse_event("result", _normalize_lookup_result(safe_json(content)))
         except Exception as exc:
             logging.exception("lookup_generate_failed query=%s", query)
             yield _sse_event("error", {"stage": "generate", "message": str(exc)})

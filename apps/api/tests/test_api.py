@@ -137,7 +137,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
                 ("progress", {"stage": "augment", "message": "Collecting dictionary context"}),
                 ("sources", {"sources": fake_sources}),
                 ("progress", {"stage": "generate", "message": "Generating dictionary entry"}),
-                ("result", {"targetWord": "apple"}),
+                ("result", {"targetWord": "apple", "partsOfSpeech": []}),
             ],
         )
         self.assertEqual(fake_create.call_count, 1)
@@ -146,6 +146,44 @@ class ApiEndpointsTestCase(unittest.TestCase):
             "apple",
             local_autocomplete=api_app.LOCAL_AUTOCOMPLETE,
             preferred_language="en",
+        )
+
+    def test_lookup_normalizes_parts_of_speech(self):
+        fake_create = AsyncMock(
+            return_value=make_chat_response(
+                json.dumps(
+                    {
+                        "targetWord": "run",
+                        "partsOfSpeech": ["Verb", "noun", "verb", "unknown", 42, "proper  noun"],
+                    }
+                )
+            )
+        )
+        fake_client = make_fake_client(fake_create)
+
+        with (
+            patch.object(api_app, "_client_for_model", return_value=fake_client),
+            patch.object(
+                api_app,
+                "async_lookupdictionary_bundle",
+                AsyncMock(return_value={"augmented_content": "", "sources": []}),
+            ),
+        ):
+            response = self.client.post(
+                "/api/lookup",
+                json={
+                    "query": "run",
+                    "preferredLanguage": "en",
+                    "model": self.model_id,
+                    "timestamp": int(time.time() * 1000),
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        events = parse_sse_events(response.text)
+        self.assertEqual(
+            events[-1],
+            ("result", {"targetWord": "run", "partsOfSpeech": ["verb", "noun", "proper noun"]}),
         )
 
     def test_lookup_applies_model_params_and_expands_json_schema(self):
@@ -291,7 +329,7 @@ class ApiEndpointsTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         events = parse_sse_events(response.text)
-        self.assertEqual(events[-1], ("result", {"targetWord": "オーケストラレーション"}))
+        self.assertEqual(events[-1], ("result", {"targetWord": "オーケストラレーション", "partsOfSpeech": []}))
 
     def test_preconnect_ignores_body_and_warms_all_sources(self):
         fake_payload = {

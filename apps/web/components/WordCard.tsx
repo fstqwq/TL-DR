@@ -4,6 +4,7 @@ import { LanguageBadge } from './LanguageBadge';
 import { Volume2, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import { playAudio } from '../services/ttsService';
 import { WordContent } from './WordContent';
+import { PartOfSpeechBadges } from './PartOfSpeechBadges';
 
 interface WordCardProps {
   entry: DictionaryEntry;
@@ -38,7 +39,7 @@ export const WordCard: React.FC<WordCardProps> = ({ entry, isHistory = false, on
         onClick={isHistory ? toggleExpand : undefined}
       >
         <div className="flex items-center justify-between w-full">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             {isHistory && (
               <div className="text-slate-400">
                 {isExpanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
@@ -48,6 +49,8 @@ export const WordCard: React.FC<WordCardProps> = ({ entry, isHistory = false, on
             <h2 className={`font-bold text-slate-800 ${isHistory ? 'text-xl' : 'text-3xl'}`}>
               {data.targetWord}
             </h2>
+
+            <PartOfSpeechBadges partsOfSpeech={data.partsOfSpeech} />
 
             {data.detectedLanguage !== 'unknown' && (
               <button

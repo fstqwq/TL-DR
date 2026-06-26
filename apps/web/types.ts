@@ -22,6 +22,7 @@ export interface LookupSource {
 export interface DictionaryData {
   targetWord: string;
   detectedLanguage: 'zh' | 'en' | 'ja' | 'unknown';
+  partsOfSpeech?: string[];
   origin?: string; // Origin word for loanwords (e.g. "Television" for "テレビ")
   definitions: {
     zh: string;

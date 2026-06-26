@@ -34,6 +34,42 @@ const toLanguage = (value: unknown): DictionaryData["detectedLanguage"] => {
 const toStringArray = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 
+const ALLOWED_PARTS_OF_SPEECH = new Set([
+  "noun",
+  "proper noun",
+  "verb",
+  "adjective",
+  "adverb",
+  "pronoun",
+  "preposition",
+  "conjunction",
+  "interjection",
+  "particle",
+  "determiner",
+  "numeral",
+  "counter",
+  "prefix",
+  "suffix",
+  "phrase",
+  "proverb",
+  "expression",
+]);
+
+const normalizePartsOfSpeech = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const label = item.trim().toLowerCase().replace(/\s+/g, " ");
+    if (!ALLOWED_PARTS_OF_SPEECH.has(label) || seen.has(label)) continue;
+    seen.add(label);
+    normalized.push(label);
+  }
+  return normalized;
+};
+
 const normalizeDictionaryData = (raw: unknown, query: string): DictionaryData => {
   const data = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const translations = (data.translations && typeof data.translations === "object"
@@ -52,6 +88,7 @@ const normalizeDictionaryData = (raw: unknown, query: string): DictionaryData =>
   return {
     targetWord,
     detectedLanguage: toLanguage(data.detectedLanguage),
+    partsOfSpeech: normalizePartsOfSpeech(data.partsOfSpeech),
     ...(originRaw ? { origin: originRaw } : {}),
     definitions: {
       zh: toStringValue(definitions.zh),
