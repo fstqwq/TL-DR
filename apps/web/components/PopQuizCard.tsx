@@ -4,7 +4,6 @@ import { DictionaryEntry } from '../types';
 import { playAudio } from '../services/ttsService';
 import { LanguageBadge } from './LanguageBadge';
 import { WordContent } from './WordContent';
-import { PartOfSpeechBadges } from './PartOfSpeechBadges';
 
 type PopQuizCardProps = {
   quizCard: DictionaryEntry | null;
@@ -102,7 +101,6 @@ export const PopQuizCard: React.FC<PopQuizCardProps> = ({
                 <div className="text-center space-y-1">
                   <div className="flex items-center justify-center gap-3 text-2xl font-bold text-slate-900">
                     <span>{quizCard.data.targetWord}</span>
-                    {quizRevealed && <PartOfSpeechBadges partsOfSpeech={quizCard.data.partsOfSpeech} />}
                     {quizCard.data.detectedLanguage !== 'unknown' && (
                       <div className="flex items-center gap-2 text-base font-normal">
                         <button

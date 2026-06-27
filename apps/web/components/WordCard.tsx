@@ -4,7 +4,6 @@ import { LanguageBadge } from './LanguageBadge';
 import { Volume2, Trash2, ChevronDown, ChevronUp } from 'lucide-react';
 import { playAudio } from '../services/ttsService';
 import { WordContent } from './WordContent';
-import { PartOfSpeechBadges } from './PartOfSpeechBadges';
 
 interface WordCardProps {
   entry: DictionaryEntry;
@@ -49,8 +48,6 @@ export const WordCard: React.FC<WordCardProps> = ({ entry, isHistory = false, on
             <h2 className={`font-bold text-slate-800 ${isHistory ? 'text-xl' : 'text-3xl'}`}>
               {data.targetWord}
             </h2>
-
-            <PartOfSpeechBadges partsOfSpeech={data.partsOfSpeech} />
 
             {data.detectedLanguage !== 'unknown' && (
               <button

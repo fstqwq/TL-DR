@@ -3,6 +3,7 @@ import { Volume2, BookOpen } from 'lucide-react';
 import { DictionaryEntry } from '../types';
 import { playAudio } from '../services/ttsService';
 import { LookupSources } from './LookupSources';
+import { PartOfSpeechBadges } from './PartOfSpeechBadges';
 
 type WordContentProps = {
   entry: DictionaryEntry;
@@ -69,6 +70,11 @@ export const WordContent: React.FC<WordContentProps> = ({
           </span>
         </div>
       </div>
+
+      <PartOfSpeechBadges
+        partsOfSpeech={data.partsOfSpeech}
+        className="-mt-2 mb-6 px-1 justify-start"
+      />
 
       {/* Definitions List */}
       <div className="space-y-3 mb-6">
